@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         豆包无水印图片下载
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  为豆包添加无水印图片下载功能
 // @author       Qalxry
 // @license      GPL-3.0
