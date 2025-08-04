@@ -3,7 +3,7 @@
 
 一个为豆包网站添加无水印图片下载功能的用户脚本。
 
-***安装油猴脚本 👉 [(greasyfork) 豆包无水印图片下载](https://greasyfork.org/en/scripts/523540-csdn2md-%E6%89%B9%E9%87%8F%E4%B8%8B%E8%BD%BDcsdn%E6%96%87%E7%AB%A0%E4%B8%BAmarkdown)***
+***安装油猴脚本 👉 [(greasyfork) 豆包无水印图片下载](https://greasyfork.org/en/scripts/544607-%E8%B1%86%E5%8C%85%E6%97%A0%E6%B0%B4%E5%8D%B0%E5%9B%BE%E7%89%87%E4%B8%8B%E8%BD%BD)***
 
 ![image](./assets/image.png)
 
