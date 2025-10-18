@@ -1,4 +1,9 @@
 
+> [!WARNING]
+>
+> 该仓库已弃用不再维护，请使用更佳的解决方案：[https://github.com/LauZzL/doubao-downloader](https://github.com/LauZzL/doubao-downloader)
+>
+
 # 豆包无水印图片下载（油猴脚本）
 
 一个为豆包网站添加无水印图片下载功能的用户脚本。无损去除水印。
