@@ -1,16 +1,10 @@
-
-> [!WARNING]
->
-> 该仓库已弃用不再维护，请使用更佳的解决方案：[https://github.com/LauZzL/doubao-downloader](https://github.com/LauZzL/doubao-downloader)
->
-
 # 豆包无水印图片下载（油猴脚本）
 
 一个为豆包网站添加无水印图片下载功能的用户脚本。无损去除水印。
 
 > [!NOTE]
 >
-> 时效：2025.9.29 测试有效，后期随时可能失效。如果不是因为原理破坏而失效，可以提issue，会在1天内答复。
+> 时效：2026.4.24 测试有效，后期随时可能失效。如果不是因为原理破坏而失效，可以提issue，会在1天内答复。
 >
 > ***安装油猴脚本 👉 [(greasyfork) 豆包无水印图片下载](https://greasyfork.org/en/scripts/544607-%E8%B1%86%E5%8C%85%E6%97%A0%E6%B0%B4%E5%8D%B0%E5%9B%BE%E7%89%87%E4%B8%8B%E8%BD%BD)***
 
