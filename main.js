@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         豆包无水印图片下载
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      2.0.0
 // @description  为豆包添加无水印图片下载功能（适配新版页面结构）
 // @author       Qalxry(modified)
 // @license      GPL-3.0
@@ -154,7 +154,7 @@
 
   // ── 注入右键菜单项 ─────────────────────────────────────────────────────────
   const mo = new MutationObserver(() => {
-    const menu = document.querySelector("div.semi-dropdown-content");
+    const menu = document.querySelector("div.semi-dropdown-content div");
     if (!menu || menu.querySelector(".tm-no-watermark-btn")) return;
 
     const existingItemClass =
@@ -177,7 +177,7 @@
 
     btn.addEventListener("click", async () => {
       if (!capturedImageInfo) {
-        showToast("未捕获到图片信息，请重新右键点击图片");
+        showToast("未捕获到图片信息，请确保在大图预览界面右键点击图片后再选择此项。<br/>聊天对话中的图片下载暂未支持。", 5000);
         return;
       }
 
