@@ -41,10 +41,8 @@
 ## 安装方法
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 浏览器扩展
-2. 点击 [安装脚本](https://greasyfork.org/en/scripts/544607-%E8%B1%86%E5%8C%85%E6%97%A0%E6%B0%B4%E5%8D%B0%E5%9B%BE%E7%89%87%E4%B8%8B%E8%BD%BD) 或手动复制脚本代码到 Tampermonkey
+2. [通过 GreasyFork](https://greasyfork.org/en/scripts/544607-%E8%B1%86%E5%8C%85%E6%97%A0%E6%B0%B4%E5%8D%B0%E5%9B%BE%E7%89%87%E4%B8%8B%E8%BD%BD) 或 [通过 GitHub Release](https://github.com/Qalxry/doubao-no-watermark/releases/latest) 安装油猴脚本
 3. 确保脚本已启用
-
-> 如果您无法访问 Greasy Fork，可通过 [GitHub Release](https://github.com/Qalxry/doubao-no-watermark/releases/latest) 下载脚本文件
 
 ## 使用方法
 
