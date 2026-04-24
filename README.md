@@ -53,6 +53,10 @@
 
 GPL-3.0 License
 
+## 特别鸣谢
+
+- 感谢 @Zhanghuaimin-233 提交的 [PR#1](https://github.com/Qalxry/doubao-no-watermark/pull/1): 适配豆包新版页面结构，重构图片获取与合并逻辑
+
 ---
 
 ⚠️ **免责声明**: 本脚本仅供学习交流使用，请遵守相关网站的使用条款。
