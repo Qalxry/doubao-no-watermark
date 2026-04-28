@@ -8,7 +8,7 @@
 > 
 > 后期随时可能失效。如果不是因为原理破坏而失效，可以提PR/Issue，会在1天内答复。
 >
-> ***安装油猴脚本 👉 [(GreasyFork) 豆包无水印图片下载](https://greasyfork.org/en/scripts/544607-%E8%B1%86%E5%8C%85%E6%97%A0%E6%B0%B4%E5%8D%B0%E5%9B%BE%E7%89%87%E4%B8%8B%E8%BD%BD) | [(GitHub Release) 豆包无水印图片下载](https://github.com/Qalxry/doubao-no-watermark/releases/latest)***
+> ***安装油猴脚本 👉 [(GreasyFork) 豆包无水印图片下载](https://greasyfork.org/scripts/544607) | [(GitHub Release) 豆包无水印图片下载](https://github.com/Qalxry/doubao-no-watermark/releases/latest)***
 
 ![image](./assets/image.png)
 
@@ -41,7 +41,7 @@
 ## 安装方法
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 浏览器扩展
-2. [通过 GreasyFork](https://greasyfork.org/en/scripts/544607-%E8%B1%86%E5%8C%85%E6%97%A0%E6%B0%B4%E5%8D%B0%E5%9B%BE%E7%89%87%E4%B8%8B%E8%BD%BD) 或 [通过 GitHub Release](https://github.com/Qalxry/doubao-no-watermark/releases/latest) 安装油猴脚本
+2. [通过 GreasyFork](https://greasyfork.org/scripts/544607) 或 [通过 GitHub Release](https://github.com/Qalxry/doubao-no-watermark/releases/latest) 安装油猴脚本
 3. 确保脚本已启用
 
 ## 使用方法
