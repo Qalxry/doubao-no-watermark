@@ -15,9 +15,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Generate Release Body
+        id: release_body
+        run: |
+          cat <<'EOF' > /tmp/release-body.md
+          ## 📦 安装方式
+
+          | 来源 | 链接 |
+          |------|------|
+          | **GreasyFork** | [豆包无水印图片下载](https://greasyfork.org/scripts/544607) |
+          | **GitHub Release** | 见下方附件 (`doubao_no_watermark.user.js`) |
+
+          ---
+
+          ### 变更
+          EOF
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ github.ref_name }}
+          body_path: /tmp/release-body.md
           generate_release_notes: true
+          append_body: true
           files: doubao_no_watermark.user.js
