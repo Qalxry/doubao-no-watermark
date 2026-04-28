@@ -15,19 +15,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Generate Release Body
+        run: |
+          cat > /tmp/custom_body.md << 'CUSTOM_EOF'
+          ## 📦 安装方式
+
+          | 来源 | 链接 |
+          |------|------|
+          | **GreasyFork** | [豆包无水印图片下载](https://greasyfork.org/scripts/544607) |
+          | **GitHub Release** | 点击下方附件 (`doubao_no_watermark.user.js`) 即可触发安装
+
+          ---
+
+          CUSTOM_EOF
+
+          gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="${{ github.ref_name }}" \
+            -q .body >> /tmp/custom_body.md
+
+          {
+            echo 'RELEASE_BODY<<RELEASE_EOF'
+            cat /tmp/custom_body.md
+            echo 'RELEASE_EOF'
+          } >> "$GITHUB_ENV"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ github.ref_name }}
-          body: |
-            ## 📦 安装方式
-
-            | 来源 | 链接 |
-            |------|------|
-            | **GreasyFork** | [豆包无水印图片下载](https://greasyfork.org/scripts/544607) |
-            | **GitHub Release** | 点击下方附件 (`doubao_no_watermark.user.js`) 即可触发安装 |
-
-            ---
-          generate_release_notes: true
-          append_body: true
+          name: ${{ github.ref_name }}
+          body: ${{ env.RELEASE_BODY }}
           files: doubao_no_watermark.user.js
