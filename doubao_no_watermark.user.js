@@ -106,6 +106,13 @@
           // 底图：图A 全量（右下角无水印）
           ctx.drawImage(imgA, 0, 0);
 
+          // 统一取整，避免奇数尺寸时浮点不一致
+          const halfW = Math.ceil(imgA.width / 2);
+          const halfH = Math.ceil(imgA.height / 2);
+
+          // 清除左上区域，消除图A水印像素的影响
+          ctx.clearRect(0, 0, halfW, halfH);
+
           // 用图B的左上 1/4 覆盖图A的左上 1/4
           if (imgA.width !== imgB.width || imgA.height !== imgB.height) {
             showToast("图片尺寸不一致，正在缩放…");
@@ -113,12 +120,11 @@
             tmp.width = imgA.width;
             tmp.height = imgA.height;
             tmp.getContext("2d").drawImage(imgB, 0, 0, imgA.width, imgA.height);
-            ctx.drawImage(tmp, 0, 0, imgA.width / 2, imgA.height / 2,
-                               0, 0, imgA.width / 2, imgA.height / 2);
+            ctx.drawImage(tmp, 0, 0, halfW, halfH, 0, 0, halfW, halfH);
           } else {
             ctx.drawImage(imgB,
-              0, 0, imgB.width / 2, imgB.height / 2,
-              0, 0, imgA.width / 2, imgA.height / 2
+              0, 0, halfW, halfH,
+              0, 0, halfW, halfH
             );
           }
 
