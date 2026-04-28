@@ -15,38 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate Release Body
-        id: release_body
-        run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          BODY_FILE=/tmp/release-body.md
-
-          echo "## 📦 安装方式" > "$BODY_FILE"
-          echo "" >> "$BODY_FILE"
-          echo "| 来源 | 链接 |" >> "$BODY_FILE"
-          echo "|------|------|" >> "$BODY_FILE"
-          echo "| **GreasyFork** | [豆包无水印图片下载](https://greasyfork.org/scripts/544607) |" >> "$BODY_FILE"
-          echo "| **GitHub Release** | 见下方附件 (\`doubao_no_watermark.user.js\`) |" >> "$BODY_FILE"
-          echo "" >> "$BODY_FILE"
-          echo "---" >> "$BODY_FILE"
-          echo "" >> "$BODY_FILE"
-          echo "## 变更" >> "$BODY_FILE"
-          echo "" >> "$BODY_FILE"
-
-          if [ -n "$PREV_TAG" ]; then
-            echo "从 $PREV_TAG 到 ${{ github.ref_name }} 的变更：" >> "$BODY_FILE"
-            echo "" >> "$BODY_FILE"
-            git log --oneline "$PREV_TAG"..HEAD | while read line; do
-              msg=$(echo "$line" | sed 's/^[0-9a-f]\{7,9\} //')
-              echo "- $msg" >> "$BODY_FILE"
-            done
-          else
-            echo "首次发布" >> "$BODY_FILE"
-          fi
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ github.ref_name }}
-          body_path: /tmp/release-body.md
+          body: |
+            ## 📦 安装方式
+
+            | 来源 | 链接 |
+            |------|------|
+            | **GreasyFork** | [豆包无水印图片下载](https://greasyfork.org/scripts/544607) |
+            | **GitHub Release** | 点击下方附件 (`doubao_no_watermark.user.js`) 即可触发安装 |
+
+            ---
+          generate_release_notes: true
+          append_body: true
           files: doubao_no_watermark.user.js
