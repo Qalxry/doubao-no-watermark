@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         豆包无水印图片下载
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      2.0.1
 // @description  为豆包添加无水印图片下载功能（适配新版页面结构）
-// @author       Qalxry(modified)
+// @author       Qalxry,Zhanghuaimin-233
 // @license      GPL-3.0
 // @supportURL   https://github.com/Qalxry/doubao-no-watermark
 // @icon         https://lf-flow-web-cdn.doubao.com/obj/flow-doubao/doubao/web/logo-icon.png
