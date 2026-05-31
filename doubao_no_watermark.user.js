@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         豆包无水印图片下载
 // @namespace    http://tampermonkey.net/
-// @version      2.1.0
+// @version      2.1.1
 // @description  为豆包添加无水印图片下载功能（适配新版 canvas 侧栏与图片消息结构）
 // @author       Qalxry,Zhanghuaimin-233
 // @license      GPL-3.0
@@ -437,16 +437,31 @@
     return visibleInfo;
   }
 
+  function isVisibleElement(el) {
+    return Boolean(el && (el.offsetParent !== null || el.getClientRects().length > 0));
+  }
+
+  function isDoubaoContextMenu(menu) {
+    if (!menu) return false;
+
+    // 豆包图片右键菜单目前是 Semi Dropdown + context-menu-*，
+    // 普通模型/比例/分享菜单是 Radix role="menu"，不应注入。
+    const contextRoot = menu.matches?.('[class*="context-menu-"]')
+      ? menu
+      : menu.querySelector?.('[class*="context-menu-"]');
+    if (!contextRoot) return false;
+
+    const text = (contextRoot.innerText || contextRoot.textContent || "").trim();
+    return /下载原图|复制|引用/.test(text);
+  }
+
   function findContextMenuRoot() {
     const semiMenus = [...document.querySelectorAll(".semi-dropdown-content")]
-      .filter(el => el.offsetParent !== null || el.getClientRects().length > 0)
+      .filter(isVisibleElement)
       .map(el => el.firstElementChild || el)
-      .filter(Boolean);
-    if (semiMenus.length) return semiMenus[semiMenus.length - 1];
+      .filter(isDoubaoContextMenu);
 
-    const roleMenus = [...document.querySelectorAll('[role="menu"][data-state="open"]')]
-      .filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
-    return roleMenus.at(-1) || null;
+    return semiMenus.at(-1) || null;
   }
 
   function cloneMenuItemClass(menu) {
