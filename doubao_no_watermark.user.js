@@ -876,6 +876,24 @@
       console.log(`[无水印] 图片处理循环结束，成功 ${successCount}/${total}，batchCancel=${batchCancel}`);
       if (successCount > 0 && !batchCancel) {
         batchBtn.textContent = "打包中…";
+
+        // 先测试 JSZip 基本功能
+        try {
+          console.log("[无水印] JSZip 版本:", JSZip?.version, "类型:", typeof JSZip);
+          const testZip = new JSZip();
+          testZip.file("test.txt", "hello");
+          console.log("[无水印] 测试打包开始…");
+          const testResult = await testZip.generateAsync({ type: "uint8array" });
+          console.log("[无水印] 测试打包成功，长度:", testResult.length);
+        } catch (testErr) {
+          console.error("[无水印] JSZip 测试失败:", testErr);
+          showToast(`JSZip 测试失败：${testErr.message}`, 5000);
+          batchDownloading = false;
+          batchBtn.textContent = "批量下载";
+          batchBtn.classList.remove("danger");
+          return;
+        }
+
         console.log(`[无水印] 开始打包 ${successCount} 张图片…`);
         try {
           const zipUint8 = await zip.generateAsync({
