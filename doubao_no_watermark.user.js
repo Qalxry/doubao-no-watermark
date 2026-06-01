@@ -21,13 +21,26 @@
   function loadJSZip() {
     return new Promise((resolve, reject) => {
       if (typeof JSZip !== "undefined") return resolve();
+      // 如果 unsafeWindow 上已有 JSZip（之前动态加载过），直接桥接到沙箱
+      if (typeof unsafeWindow !== "undefined" && typeof unsafeWindow.JSZip !== "undefined") {
+        window.JSZip = unsafeWindow.JSZip;
+        console.log("[无水印] JSZip 从 unsafeWindow 桥接成功");
+        return resolve();
+      }
       const script = document.createElement("script");
       script.src = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
+      const timer = setTimeout(() => reject(new Error("JSZip 加载超时")), 15000);
       script.onload = () => {
+        clearTimeout(timer);
         console.log("[无水印] JSZip 动态加载成功");
+        // 将页面上下文中的 JSZip 桥接到沙箱
+        if (typeof JSZip === "undefined" && typeof unsafeWindow !== "undefined" && typeof unsafeWindow.JSZip !== "undefined") {
+          window.JSZip = unsafeWindow.JSZip;
+          console.log("[无水印] JSZip 已从页面上下文桥接到沙箱");
+        }
         resolve();
       };
-      script.onerror = () => reject(new Error("JSZip 加载失败"));
+      script.onerror = () => { clearTimeout(timer); reject(new Error("JSZip 加载失败")); };
       document.head.appendChild(script);
     });
   }
@@ -816,12 +829,14 @@
       const selected = [...container.querySelectorAll(".nomark-select:checked")];
       if (selected.length === 0) { showToast("请先选择要下载的图片", 3000); return; }
 
+      console.log(`[无水印] 批量下载开始，共 ${selected.length} 张图片`);
       batchDownloading = true;
       batchCancel = false;
       batchBtn.textContent = "取消下载";
       batchBtn.classList.add("danger");
 
       const zip = new JSZip();
+      console.log("[无水印] JSZip 实例创建成功");
       const folder = zip.folder("豆包无水印图片");
       let successCount = 0;
       const total = selected.length;
@@ -838,7 +853,11 @@
         if (dlBtn) dlBtn.textContent = `合并中 ${i + 1}/${total}`;
 
         try {
-          const blob = await mergeImageToBlob(item.info);
+          console.log(`[无水印] 正在合并第 ${i + 1}/${total} 张图片…`);
+          const blob = await Promise.race([
+            mergeImageToBlob(item.info),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("图片合并超时(30s)")), 30000)),
+          ]);
           const baseFilename = getSafeFilename(item.info);
           const ext = baseFilename.lastIndexOf(".");
           const filename = ext > 0
@@ -854,13 +873,16 @@
         }
       }
 
+      console.log(`[无水印] 图片处理循环结束，成功 ${successCount}/${total}，batchCancel=${batchCancel}`);
       if (successCount > 0 && !batchCancel) {
         batchBtn.textContent = "打包中…";
+        console.log(`[无水印] 开始打包 ${successCount} 张图片…`);
         try {
           const zipBlob = await zip.generateAsync({
             type: "blob",
             compression: "STORE",
           });
+          console.log(`[无水印] 打包完成，zip 大小: ${(zipBlob.size / 1024).toFixed(1)} KB`);
           const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
           downloadBlob(zipBlob, `豆包无水印图片_${timestamp}.zip`);
           showToast(`打包完成！共 ${successCount} 张图片`);
