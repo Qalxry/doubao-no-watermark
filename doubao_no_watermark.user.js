@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         豆包无水印图片下载
 // @namespace    http://tampermonkey.net/
-// @version      2.1.1
-// @description  为豆包添加无水印图片下载功能（适配新版 canvas 侧栏与图片消息结构）
+// @version      2.2.0-experimental
+// @description  为豆包添加无水印图片下载功能（适配新版 canvas 侧栏与图片消息结构）- 实验性模态框 UI
 // @author       Qalxry,Zhanghuaimin-233
 // @license      GPL-3.0
 // @supportURL   https://github.com/Qalxry/doubao-no-watermark
@@ -305,6 +305,57 @@
     return null;
   }
 
+  // ── 图片收集系统 ─────────────────────────────────────────────────────────
+  const collectedImages = []; // 存储 { info, thumbnailUrl } 对象
+
+  function getImageKeyForDedup(info) {
+    return info?.key || extractImageKey(info?.previewImage?.url) || extractImageKey(info?.downloadImage?.url) || "";
+  }
+
+  function addCollectedImage(info) {
+    if (!info?.previewImage?.url || !info?.downloadImage?.url) return false;
+    const key = getImageKeyForDedup(info);
+    if (!key) return false;
+    if (collectedImages.some(item => getImageKeyForDedup(item.info) === key)) return false;
+    collectedImages.push({ info, thumbnailUrl: info.previewImage.url });
+    updateModalCount();
+    return true;
+  }
+
+  function scanAndCollectImages() {
+    const elements = [...document.querySelectorAll("canvas,img")]
+      .filter(el => {
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 40 && rect.height >= 40;
+      });
+
+    for (const el of elements) {
+      const info = getImageInfoFromElement(el, el.currentSrc || el.src || "");
+      if (info) addCollectedImage(info);
+    }
+  }
+
+  // 定期扫描 + MutationObserver 扫描
+  let scanTimer = null;
+  function startScanning() {
+    if (scanTimer) return;
+    scanTimer = setInterval(scanAndCollectImages, 3000);
+    scanAndCollectImages();
+  }
+
+  const scanObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === 1 && (node.tagName === "IMG" || node.tagName === "CANVAS")) {
+          setTimeout(scanAndCollectImages, 500);
+          return;
+        }
+      }
+    }
+  });
+  scanObserver.observe(document.body, { childList: true, subtree: true });
+  startScanning();
+
   // ── Toast ──────────────────────────────────────────────────────────────────
   const toastDiv = document.createElement("div");
   toastDiv.style.cssText = `
@@ -532,4 +583,316 @@
   });
 
   mo.observe(document.body, { childList: true, subtree: true });
+
+  // ── 悬浮按钮 + 模态框 UI ──────────────────────────────────────────────────
+  const NOMARK_BUTTON_HOST_ID = "doubao-nomark-button-host";
+  const NOMARK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24"><path d="M0 0h24v24H0z" fill="none"/><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"><path d="M2.5 13.5v-7h19v7c0 3.771 0 5.657-1.172 6.828S17.272 21.5 13.5 21.5h-3c-3.771 0-5.657 0-6.828-1.172S2.5 17.271 2.5 13.5m0-7l.6-.8c1.178-1.57 1.767-2.355 2.611-2.778C6.556 2.5 7.537 2.5 9.5 2.5h5c1.963 0 2.944 0 3.789.422c.845.423 1.433 1.208 2.611 2.778l.6.8"/><path d="M15 14.5s-2.21 3-3 3s-3-3-3-3m3 2.5v-6.5"/></g></svg>`;
+
+  let floatingBtnElement = null;
+  let modalElement = null;
+
+  function updateModalCount() {
+    if (!floatingBtnElement) return;
+    const countEl = floatingBtnElement.querySelector(".count");
+    if (!countEl) return;
+    const count = collectedImages.length;
+    countEl.textContent = String(count);
+    countEl.classList.toggle("show", count > 0);
+  }
+
+  function createFloatingButton() {
+    const wrapper = document.createElement("div");
+    wrapper.id = NOMARK_BUTTON_HOST_ID;
+    wrapper.innerHTML = `
+      <style>
+        #${NOMARK_BUTTON_HOST_ID} {
+          position: fixed; right: 24px; bottom: 24px; z-index: 2147483646;
+          display: inline-flex; align-items: center; justify-content: center;
+        }
+        #doubao-nomark-btn {
+          width: 48px; height: 48px; background: #ffffff; border: 1px solid #e0e0e0;
+          border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+          display: flex; align-items: center; justify-content: center; font-size: 20px;
+          cursor: pointer; transition: border-color 0.2s ease, box-shadow 0.2s ease;
+          position: relative; overflow: visible; color: #1f1f1f;
+        }
+        #doubao-nomark-btn:hover { border-color: #1f1f1f; box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+        #doubao-nomark-btn .count {
+          position: absolute; top: -7px; right: -6px; z-index: 1;
+          display: none; min-width: 13px; height: 13px; padding: 0 3px;
+          background: #ff4d4f; color: #ffffff; border-radius: 999px;
+          font: 600 8px/13px sans-serif; align-items: center; justify-content: center;
+          text-align: center; pointer-events: none; box-shadow: 0 0 0 1.5px #ffffff;
+        }
+        #doubao-nomark-btn .count.show { display: flex; }
+      </style>
+      <button id="doubao-nomark-btn" type="button" title="无水印图片管理">
+        ${NOMARK_ICON_SVG}
+        <span class="count" aria-live="polite">0</span>
+      </button>
+    `;
+    document.body.appendChild(wrapper);
+    floatingBtnElement = wrapper.querySelector("#doubao-nomark-btn");
+    floatingBtnElement.addEventListener("click", openModal);
+  }
+
+  function openModal() {
+    if (!modalElement) createModal();
+    renderModalImages();
+    modalElement.classList.add("show");
+  }
+
+  function closeModal() {
+    if (modalElement) modalElement.classList.remove("show");
+  }
+
+  function createModal() {
+    const modal = document.createElement("div");
+    modal.id = "doubao-nomark-modal";
+    modal.innerHTML = `
+      <style>
+        #doubao-nomark-modal {
+          position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+          background: rgba(0,0,0,0.4); z-index: 10000; display: none;
+          align-items: center; justify-content: center; animation: fadeIn 0.2s ease;
+        }
+        #doubao-nomark-modal.show { display: flex; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .nomark-modal-content {
+          background: #ffffff; border-radius: 12px; width: 888px;
+          max-width: calc(100vw - 48px); max-height: 85vh;
+          display: flex; flex-direction: column; overflow: hidden;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.16);
+          animation: slideUp 0.3s cubic-bezier(0.34,1.56,0.64,1);
+          font-size: 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .nomark-modal-topbar {
+          padding: 10px 20px 0; border-bottom: 1px solid #e0e0e0;
+          display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        }
+        .nomark-modal-actions { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+        .nomark-top-btn {
+          height: 26px; padding: 0 8px; border: 1px solid #e0e0e0; border-radius: 6px;
+          background: #ffffff; color: #1f1f1f; font-size: 12px; font-weight: 500;
+          cursor: pointer; transition: all 0.2s ease; white-space: nowrap;
+        }
+        .nomark-top-btn:hover { background: #f7f7f7; border-color: #1f1f1f; }
+        .nomark-top-btn.danger { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
+        .nomark-close-btn {
+          width: 26px; height: 26px; background: transparent; border: 1px solid #e0e0e0;
+          border-radius: 6px; cursor: pointer; display: flex; align-items: center;
+          justify-content: center; color: #6b6b6b; font-size: 12px; transition: all 0.2s ease;
+        }
+        .nomark-close-btn:hover { background: #f7f7f7; border-color: #1f1f1f; color: #1f1f1f; }
+        .nomark-modal-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+        .nomark-modal-body::-webkit-scrollbar { width: 6px; }
+        .nomark-modal-body::-webkit-scrollbar-track { background: transparent; }
+        .nomark-modal-body::-webkit-scrollbar-thumb { background: #d0d0d0; border-radius: 3px; }
+        .nomark-media-grid {
+          --card-w: 160px; --preview-h: 160px;
+          display: grid; grid-template-columns: repeat(5, var(--card-w));
+          justify-content: start; gap: 12px;
+        }
+        .nomark-card {
+          position: relative; border-radius: 8px; overflow: hidden;
+          border: 1px solid #e0e0e0; background: #fafafa;
+          transition: all 0.2s ease; display: flex; flex-direction: column;
+        }
+        .nomark-card:hover { border-color: #1f1f1f; }
+        .nomark-preview {
+          position: relative; width: 100%; height: var(--preview-h);
+          display: block; background: #f0f0f0; cursor: pointer;
+        }
+        .nomark-preview img {
+          width: 100%; height: var(--preview-h); object-fit: cover; display: block;
+        }
+        .nomark-info {
+          position: absolute; top: 8px; right: 8px; padding: 3px 6px;
+          background: rgba(0,0,0,0.6); border-radius: 4px; font-size: 12px;
+          color: #ffffff; font-weight: 500; opacity: 0; transition: opacity 0.2s ease;
+        }
+        .nomark-card:hover .nomark-info { opacity: 1; }
+        .nomark-actions {
+          display: flex; align-items: center; gap: 6px; padding: 8px;
+          background: #ffffff; border-top: 1px solid #e0e0e0;
+        }
+        .nomark-action-btn {
+          flex: 0 0 auto; min-width: 52px; padding: 6px 10px;
+          border: 1px solid #e0e0e0; border-radius: 4px; background: #ffffff;
+          color: #1f1f1f; font-size: 12px; font-weight: 500; cursor: pointer;
+          transition: all 0.2s ease;
+        }
+        .nomark-action-btn:hover { background: #f7f7f7; border-color: #1f1f1f; }
+        .nomark-action-btn.success { background: #f0fdf4; border-color: #86efac; color: #166534; }
+        .nomark-select {
+          width: 14px; height: 14px; margin: 0 0 0 auto; accent-color: #1f1f1f; cursor: pointer;
+        }
+        .nomark-empty {
+          text-align: center; padding: 56px 20px; color: #a0a0a0;
+        }
+        .nomark-empty-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+        .nomark-empty-text { font-size: 12px; color: #6b6b6b; font-weight: 500; }
+        .nomark-modal-footer {
+          padding: 8px 20px; border-top: 1px solid #e0e0e0;
+          display: flex; justify-content: center; align-items: center; gap: 8px;
+          background: #fafafa;
+        }
+        .nomark-footer-text { color: #a0a0a0; font-size: 12px; }
+        @media (max-width: 920px) {
+          .nomark-modal-content { width: calc(100vw - 24px); }
+          .nomark-media-grid { grid-template-columns: repeat(auto-fill, minmax(var(--card-w), var(--card-w))); }
+        }
+      </style>
+      <div class="nomark-modal-content">
+        <div class="nomark-modal-topbar">
+          <div style="font-weight:600;font-size:14px;">无水印图片管理</div>
+          <div class="nomark-modal-actions">
+            <button class="nomark-top-btn btn-select-all" type="button">全选</button>
+            <button class="nomark-top-btn btn-clear-selection" type="button">取消选择</button>
+            <button class="nomark-top-btn btn-batch-download" type="button">批量下载</button>
+            <button class="nomark-close-btn" type="button">×</button>
+          </div>
+        </div>
+        <div class="nomark-modal-body">
+          <div class="nomark-media-grid" id="nomark-media-container"></div>
+        </div>
+        <div class="nomark-modal-footer">
+          <span class="nomark-footer-text">豆包无水印图片下载 · 实验性 UI</span>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modalElement = modal;
+
+    const container = modal.querySelector("#nomark-media-container");
+    const selectAllBtn = modal.querySelector(".btn-select-all");
+    const clearBtn = modal.querySelector(".btn-clear-selection");
+    const batchBtn = modal.querySelector(".btn-batch-download");
+    const closeBtn = modal.querySelector(".nomark-close-btn");
+
+    closeBtn.addEventListener("click", closeModal);
+    modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
+
+    selectAllBtn.addEventListener("click", () => {
+      container.querySelectorAll(".nomark-select").forEach(cb => cb.checked = true);
+    });
+    clearBtn.addEventListener("click", () => {
+      container.querySelectorAll(".nomark-select").forEach(cb => cb.checked = false);
+    });
+
+    let batchDownloading = false;
+    let batchCancel = false;
+
+    batchBtn.addEventListener("click", async () => {
+      if (batchDownloading) { batchCancel = true; return; }
+
+      const selected = [...container.querySelectorAll(".nomark-select:checked")];
+      if (selected.length === 0) { showToast("请先选择要下载的图片", 3000); return; }
+
+      batchDownloading = true;
+      batchCancel = false;
+      batchBtn.textContent = "取消下载";
+      batchBtn.classList.add("danger");
+
+      for (const cb of selected) {
+        if (batchCancel) break;
+        const idx = parseInt(cb.dataset.index, 10);
+        const item = collectedImages[idx];
+        if (!item) continue;
+
+        const card = cb.closest(".nomark-card");
+        const dlBtn = card?.querySelector(".nomark-action-btn");
+        if (dlBtn) dlBtn.textContent = "下载中";
+
+        try {
+          await downloadSingleImage(item.info);
+          if (dlBtn) { dlBtn.classList.add("success"); dlBtn.textContent = "✓ 已下载"; }
+        } catch (err) {
+          if (dlBtn) dlBtn.textContent = "失败";
+          console.error("[无水印] 批量下载失败:", err);
+        }
+        setTimeout(() => { if (dlBtn) { dlBtn.classList.remove("success"); dlBtn.textContent = "下载"; } }, 2000);
+      }
+
+      batchDownloading = false;
+      batchBtn.textContent = "批量下载";
+      batchBtn.classList.remove("danger");
+      if (!batchCancel) showToast("批量下载完成！");
+    });
+  }
+
+  async function downloadSingleImage(imageInfo) {
+    const urlA = imageInfo.previewImage.url;
+    const urlB = imageInfo.downloadImage.url;
+    if (!isFetchableImageUrl(urlA) || !isFetchableImageUrl(urlB)) {
+      throw new Error("图片地址无效");
+    }
+    const [blobA, blobB] = await Promise.all([gmFetchBlob(urlA), gmFetchBlob(urlB)]);
+    const merged = await mergeImages(blobA, blobB);
+    const filename = getSafeFilename(imageInfo);
+    downloadBlob(merged, filename);
+  }
+
+  function renderModalImages() {
+    const container = document.querySelector("#nomark-media-container");
+    if (!container) return;
+
+    if (collectedImages.length === 0) {
+      container.innerHTML = `
+        <div class="nomark-empty">
+          <div class="nomark-empty-icon">🖼️</div>
+          <div class="nomark-empty-text">暂未发现图片</div>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = collectedImages.map((item, index) => {
+      const info = item.info;
+      const resolution = (info.width && info.height) ? `${info.width} × ${info.height}` : "";
+      return `
+        <div class="nomark-card">
+          <div class="nomark-preview">
+            <img src="${item.thumbnailUrl}" alt="图片 ${index + 1}" loading="lazy">
+            ${resolution ? `<div class="nomark-info">${resolution}</div>` : ""}
+          </div>
+          <div class="nomark-actions">
+            <button class="nomark-action-btn" data-index="${index}">下载</button>
+            <input class="nomark-select" type="checkbox" data-index="${index}" aria-label="选择图片 ${index + 1}">
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    container.querySelectorAll(".nomark-action-btn").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.index, 10);
+        const item = collectedImages[idx];
+        if (!item) return;
+
+        btn.textContent = "下载中";
+        try {
+          await downloadSingleImage(item.info);
+          btn.classList.add("success");
+          btn.textContent = "✓ 已下载";
+        } catch (err) {
+          btn.textContent = "失败";
+          showToast(`下载失败：${err.message}`, 3000);
+        }
+        setTimeout(() => { btn.classList.remove("success"); btn.textContent = "下载"; }, 2000);
+      });
+    });
+
+    container.querySelectorAll(".nomark-preview img").forEach(img => {
+      img.addEventListener("click", () => {
+        const card = img.closest(".nomark-card");
+        const cb = card?.querySelector(".nomark-select");
+        if (cb) cb.checked = !cb.checked;
+      });
+    });
+  }
+
+  createFloatingButton();
 })();
