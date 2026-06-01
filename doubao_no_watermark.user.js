@@ -405,59 +405,59 @@
 
   // ── 合并：底图=图A(pre)，用图B(dld)左上1/4覆盖 ────────────────────────────
   async function mergeImages(blobA, blobB) {
-    return new Promise((resolve, reject) => {
-      const imgA = new Image();
-      const imgB = new Image();
-      let loaded = 0;
+    const urlA = URL.createObjectURL(blobA);
+    const urlB = URL.createObjectURL(blobB);
+    try {
+      return await new Promise((resolve, reject) => {
+        const imgA = new Image();
+        const imgB = new Image();
+        let loaded = 0;
 
-      function onLoad() {
-        if (++loaded < 2) return;
-        try {
-          const canvas = document.createElement("canvas");
-          canvas.width = imgA.width;
-          canvas.height = imgA.height;
-          const ctx = canvas.getContext("2d");
+        function onLoad() {
+          if (++loaded < 2) return;
+          try {
+            const canvas = document.createElement("canvas");
+            canvas.width = imgA.width;
+            canvas.height = imgA.height;
+            const ctx = canvas.getContext("2d");
 
-          // 底图：图A 全量（右下角无水印）
-          ctx.drawImage(imgA, 0, 0);
+            ctx.drawImage(imgA, 0, 0);
 
-          // 统一取整，避免奇数尺寸时浮点不一致
-          const halfW = Math.ceil(imgA.width / 2);
-          const halfH = Math.ceil(imgA.height / 2);
+            const halfW = Math.ceil(imgA.width / 2);
+            const halfH = Math.ceil(imgA.height / 2);
 
-          // 清除左上区域，消除图A水印像素的影响
-          ctx.clearRect(0, 0, halfW, halfH);
+            ctx.clearRect(0, 0, halfW, halfH);
 
-          // 用图B的左上 1/4 覆盖图A的左上 1/4
-          if (imgA.width !== imgB.width || imgA.height !== imgB.height) {
-            showToast("图片尺寸不一致，正在缩放…");
-            const tmp = document.createElement("canvas");
-            tmp.width = imgA.width;
-            tmp.height = imgA.height;
-            tmp.getContext("2d").drawImage(imgB, 0, 0, imgA.width, imgA.height);
-            ctx.drawImage(tmp, 0, 0, halfW, halfH, 0, 0, halfW, halfH);
-          } else {
-            ctx.drawImage(imgB,
-              0, 0, halfW, halfH,
-              0, 0, halfW, halfH
-            );
+            if (imgA.width !== imgB.width || imgA.height !== imgB.height) {
+              showToast("图片尺寸不一致，正在缩放…");
+              const tmp = document.createElement("canvas");
+              tmp.width = imgA.width;
+              tmp.height = imgA.height;
+              tmp.getContext("2d").drawImage(imgB, 0, 0, imgA.width, imgA.height);
+              ctx.drawImage(tmp, 0, 0, halfW, halfH, 0, 0, halfW, halfH);
+            } else {
+              ctx.drawImage(imgB, 0, 0, halfW, halfH, 0, 0, halfW, halfH);
+            }
+
+            canvas.toBlob(blob => {
+              blob ? resolve(blob) : reject(new Error("canvas.toBlob 失败"));
+            }, "image/png");
+          } catch (err) {
+            reject(err);
           }
-
-          canvas.toBlob(blob => {
-            blob ? resolve(blob) : reject(new Error("canvas.toBlob 失败"));
-          }, "image/png");
-        } catch (err) {
-          reject(err);
         }
-      }
 
-      imgA.onload = onLoad;
-      imgB.onload = onLoad;
-      imgA.onerror = () => reject(new Error("加载图A失败"));
-      imgB.onerror = () => reject(new Error("加载图B失败"));
-      imgA.src = URL.createObjectURL(blobA);
-      imgB.src = URL.createObjectURL(blobB);
-    });
+        imgA.onload = onLoad;
+        imgB.onload = onLoad;
+        imgA.onerror = () => reject(new Error("加载图A失败"));
+        imgB.onerror = () => reject(new Error("加载图B失败"));
+        imgA.src = urlA;
+        imgB.src = urlB;
+      });
+    } finally {
+      URL.revokeObjectURL(urlA);
+      URL.revokeObjectURL(urlB);
+    }
   }
 
   // ── 下载 Blob ───────────────────────────────────────────────────────────────
@@ -814,7 +814,11 @@
 
         try {
           const blob = await mergeImageToBlob(item.info);
-          const filename = getSafeFilename(item.info);
+          const baseFilename = getSafeFilename(item.info);
+          const ext = baseFilename.lastIndexOf(".");
+          const filename = ext > 0
+            ? `${baseFilename.slice(0, ext)}_${i + 1}${baseFilename.slice(ext)}`
+            : `${baseFilename}_${i + 1}`;
           folder.file(filename, blob);
           successCount++;
           if (dlBtn) { dlBtn.classList.add("success"); dlBtn.textContent = `✓ ${successCount}/${total}`; }
