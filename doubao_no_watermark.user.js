@@ -17,6 +17,21 @@
 (function () {
   "use strict";
 
+  // ── JSZip 动态加载回退 ─────────────────────────────────────────────────────
+  function loadJSZip() {
+    return new Promise((resolve, reject) => {
+      if (typeof JSZip !== "undefined") return resolve();
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
+      script.onload = () => {
+        console.log("[无水印] JSZip 动态加载成功");
+        resolve();
+      };
+      script.onerror = () => reject(new Error("JSZip 加载失败"));
+      document.head.appendChild(script);
+    });
+  }
+
   // ── GM 跨域请求，返回 Blob（绕过 CORS）─────────────────────────────────────
   function gmFetchBlob(url) {
     return new Promise((resolve, reject) => {
@@ -789,8 +804,13 @@
       if (batchDownloading) { batchCancel = true; return; }
 
       if (typeof JSZip === "undefined") {
-        showToast("JSZip 库未加载，无法打包下载。请检查网络或刷新页面重试。", 5000);
-        return;
+        showToast("正在加载 JSZip…", 0);
+        try {
+          await loadJSZip();
+        } catch (err) {
+          showToast(`JSZip 加载失败：${err.message}`, 5000);
+          return;
+        }
       }
 
       const selected = [...container.querySelectorAll(".nomark-select:checked")];
