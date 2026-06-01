@@ -11,38 +11,120 @@
 // @grant        GM_xmlhttpRequest
 // @connect      byteimg.com
 // @connect      *.byteimg.com
-// @require      https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js
 // ==/UserScript==
 
 (function () {
   "use strict";
 
-  // ── JSZip 动态加载回退 ─────────────────────────────────────────────────────
-  function loadJSZip() {
-    return new Promise((resolve, reject) => {
-      if (typeof JSZip !== "undefined") return resolve();
-      // 如果 unsafeWindow 上已有 JSZip（之前动态加载过），直接桥接到沙箱
-      if (typeof unsafeWindow !== "undefined" && typeof unsafeWindow.JSZip !== "undefined") {
-        window.JSZip = unsafeWindow.JSZip;
-        console.log("[无水印] JSZip 从 unsafeWindow 桥接成功");
-        return resolve();
+  // ── 最小化 ZIP 打包器（STORE 模式，无外部依赖）────────────────────────────
+  // 纯同步实现，不受页面 polyfill 影响
+  function buildZip(files) {
+    // files: [{ name: string, data: Uint8Array }]
+    const encoder = new TextEncoder();
+    const entries = [];
+    let offset = 0;
+
+    // 1. 构建 local file headers + data
+    const parts = [];
+    for (const file of files) {
+      const nameBytes = encoder.encode(file.name);
+      const nameLen = nameBytes.length;
+      const dataLen = file.data.length;
+
+      // local file header (30 + nameLen bytes)
+      const header = new ArrayBuffer(30 + nameLen);
+      const hv = new DataView(header);
+      hv.setUint32(0, 0x04034b50, true);  // signature
+      hv.setUint16(4, 20, true);           // version needed
+      hv.setUint16(6, 0, true);            // flags
+      hv.setUint16(8, 0, true);            // compression method (STORE)
+      hv.setUint16(10, 0, true);           // mod time
+      hv.setUint16(12, 0, true);           // mod date
+      hv.setUint32(14, crc32(file.data), true);  // crc32
+      hv.setUint32(18, dataLen, true);     // compressed size
+      hv.setUint32(22, dataLen, true);     // uncompressed size
+      hv.setUint16(26, nameLen, true);     // filename length
+      hv.setUint16(28, 0, true);           // extra field length
+      new Uint8Array(header).set(nameBytes, 30);
+
+      entries.push({ nameBytes, nameLen, dataLen, offset });
+      parts.push(new Uint8Array(header));
+      parts.push(file.data);
+      offset += 30 + nameLen + dataLen;
+    }
+
+    // 2. 构建 central directory
+    const cdStart = offset;
+    for (let i = 0; i < files.length; i++) {
+      const e = entries[i];
+      const cd = new ArrayBuffer(46 + e.nameLen);
+      const dv = new DataView(cd);
+      dv.setUint32(0, 0x02014b50, true);   // signature
+      dv.setUint16(4, 20, true);            // version made by
+      dv.setUint16(6, 20, true);            // version needed
+      dv.setUint16(8, 0, true);             // flags
+      dv.setUint16(10, 0, true);            // compression (STORE)
+      dv.setUint16(12, 0, true);            // mod time
+      dv.setUint16(14, 0, true);            // mod date
+      dv.setUint32(16, crc32(files[i].data), true);  // crc32
+      dv.setUint32(20, e.dataLen, true);    // compressed
+      dv.setUint32(24, e.dataLen, true);    // uncompressed
+      dv.setUint16(28, e.nameLen, true);    // name len
+      dv.setUint16(30, 0, true);            // extra len
+      dv.setUint16(32, 0, true);            // comment len
+      dv.setUint16(34, 0, true);            // disk number
+      dv.setUint16(36, 0, true);            // internal attrs
+      dv.setUint32(38, 0, true);            // external attrs
+      dv.setUint32(42, e.offset, true);     // local header offset
+      new Uint8Array(cd).set(e.nameBytes, 46);
+      parts.push(new Uint8Array(cd));
+      offset += 46 + e.nameLen;
+    }
+    const cdSize = offset - cdStart;
+
+    // 3. end of central directory
+    const eocd = new ArrayBuffer(22);
+    const ev = new DataView(eocd);
+    ev.setUint32(0, 0x06054b50, true);     // signature
+    ev.setUint16(4, 0, true);              // disk number
+    ev.setUint16(6, 0, true);              // disk with cd
+    ev.setUint16(8, files.length, true);   // entries on this disk
+    ev.setUint16(10, files.length, true);  // total entries
+    ev.setUint32(12, cdSize, true);        // cd size
+    ev.setUint32(16, cdStart, true);       // cd offset
+    ev.setUint16(20, 0, true);             // comment length
+    parts.push(new Uint8Array(eocd));
+
+    // 合并所有部分
+    const totalSize = parts.reduce((s, p) => s + p.length, 0);
+    const result = new Uint8Array(totalSize);
+    let pos = 0;
+    for (const part of parts) {
+      result.set(part, pos);
+      pos += part.length;
+    }
+    return result;
+  }
+
+  // CRC32 查找表 + 计算
+  const crcTable = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let j = 0; j < 8; j++) {
+        c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
       }
-      const script = document.createElement("script");
-      script.src = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
-      const timer = setTimeout(() => reject(new Error("JSZip 加载超时")), 15000);
-      script.onload = () => {
-        clearTimeout(timer);
-        console.log("[无水印] JSZip 动态加载成功");
-        // 将页面上下文中的 JSZip 桥接到沙箱
-        if (typeof JSZip === "undefined" && typeof unsafeWindow !== "undefined" && typeof unsafeWindow.JSZip !== "undefined") {
-          window.JSZip = unsafeWindow.JSZip;
-          console.log("[无水印] JSZip 已从页面上下文桥接到沙箱");
-        }
-        resolve();
-      };
-      script.onerror = () => { clearTimeout(timer); reject(new Error("JSZip 加载失败")); };
-      document.head.appendChild(script);
-    });
+      table[i] = c;
+    }
+    return table;
+  })();
+
+  function crc32(data) {
+    let crc = 0xffffffff;
+    for (let i = 0; i < data.length; i++) {
+      crc = crcTable[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xffffffff) >>> 0;
   }
 
   // ── GM 跨域请求，返回 Blob（绕过 CORS）─────────────────────────────────────
@@ -816,16 +898,6 @@
     batchBtn.addEventListener("click", async () => {
       if (batchDownloading) { batchCancel = true; return; }
 
-      if (typeof JSZip === "undefined") {
-        showToast("正在加载 JSZip…", 0);
-        try {
-          await loadJSZip();
-        } catch (err) {
-          showToast(`JSZip 加载失败：${err.message}`, 5000);
-          return;
-        }
-      }
-
       const selected = [...container.querySelectorAll(".nomark-select:checked")];
       if (selected.length === 0) { showToast("请先选择要下载的图片", 3000); return; }
 
@@ -835,9 +907,7 @@
       batchBtn.textContent = "取消下载";
       batchBtn.classList.add("danger");
 
-      const zip = new JSZip();
-      console.log("[无水印] JSZip 实例创建成功");
-      const folder = zip.folder("豆包无水印图片");
+      const zipFiles = [];
       let successCount = 0;
       const total = selected.length;
 
@@ -864,7 +934,7 @@
             ? `${baseFilename.slice(0, ext)}_${i + 1}${baseFilename.slice(ext)}`
             : `${baseFilename}_${i + 1}`;
           const arrayBuffer = await blob.arrayBuffer();
-          folder.file(filename, arrayBuffer);
+          zipFiles.push({ name: `豆包无水印图片/${filename}`, data: new Uint8Array(arrayBuffer) });
           successCount++;
           if (dlBtn) { dlBtn.classList.add("success"); dlBtn.textContent = `✓ ${successCount}/${total}`; }
         } catch (err) {
@@ -876,36 +946,11 @@
       console.log(`[无水印] 图片处理循环结束，成功 ${successCount}/${total}，batchCancel=${batchCancel}`);
       if (successCount > 0 && !batchCancel) {
         batchBtn.textContent = "打包中…";
-
-        // 先测试 JSZip 基本功能
         try {
-          console.log("[无水印] JSZip 版本:", JSZip?.version, "类型:", typeof JSZip);
-          const testZip = new JSZip();
-          testZip.file("test.txt", "hello");
-          console.log("[无水印] 测试打包开始…");
-          const testResult = await testZip.generateAsync({ type: "uint8array" });
-          console.log("[无水印] 测试打包成功，长度:", testResult.length);
-        } catch (testErr) {
-          console.error("[无水印] JSZip 测试失败:", testErr);
-          showToast(`JSZip 测试失败：${testErr.message}`, 5000);
-          batchDownloading = false;
-          batchBtn.textContent = "批量下载";
-          batchBtn.classList.remove("danger");
-          return;
-        }
-
-        console.log(`[无水印] 开始打包 ${successCount} 张图片…`);
-        try {
-          const zipUint8 = await zip.generateAsync({
-            type: "uint8array",
-            compression: "STORE",
-            onUpdate: (meta) => {
-              console.log(`[无水印] 打包进度: ${meta.percent.toFixed(1)}%`);
-            },
-          });
-          console.log(`[无水印] generateAsync 完成，uint8 长度: ${zipUint8.length}`);
-          const zipBlob = new Blob([zipUint8], { type: "application/zip" });
-          console.log(`[无水印] 打包完成，zip 大小: ${(zipBlob.size / 1024).toFixed(1)} KB`);
+          console.log(`[无水印] 开始打包 ${successCount} 张图片…`);
+          const zipData = buildZip(zipFiles);
+          console.log(`[无水印] 打包完成，zip 大小: ${(zipData.length / 1024).toFixed(1)} KB`);
+          const zipBlob = new Blob([zipData], { type: "application/zip" });
           const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
           downloadBlob(zipBlob, `豆包无水印图片_${timestamp}.zip`);
           showToast(`打包完成！共 ${successCount} 张图片`);
