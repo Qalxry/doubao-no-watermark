@@ -788,6 +788,11 @@
     batchBtn.addEventListener("click", async () => {
       if (batchDownloading) { batchCancel = true; return; }
 
+      if (typeof JSZip === "undefined") {
+        showToast("JSZip 库未加载，无法打包下载。请检查网络或刷新页面重试。", 5000);
+        return;
+      }
+
       const selected = [...container.querySelectorAll(".nomark-select:checked")];
       if (selected.length === 0) { showToast("请先选择要下载的图片", 3000); return; }
 
@@ -819,7 +824,8 @@
           const filename = ext > 0
             ? `${baseFilename.slice(0, ext)}_${i + 1}${baseFilename.slice(ext)}`
             : `${baseFilename}_${i + 1}`;
-          folder.file(filename, blob);
+          const arrayBuffer = await blob.arrayBuffer();
+          folder.file(filename, arrayBuffer);
           successCount++;
           if (dlBtn) { dlBtn.classList.add("success"); dlBtn.textContent = `✓ ${successCount}/${total}`; }
         } catch (err) {
@@ -831,11 +837,15 @@
       if (successCount > 0 && !batchCancel) {
         batchBtn.textContent = "打包中…";
         try {
-          const zipBlob = await zip.generateAsync({ type: "blob" });
+          const zipBlob = await zip.generateAsync({
+            type: "blob",
+            compression: "STORE",
+          });
           const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
           downloadBlob(zipBlob, `豆包无水印图片_${timestamp}.zip`);
           showToast(`打包完成！共 ${successCount} 张图片`);
         } catch (err) {
+          console.error("[无水印] 打包失败:", err);
           showToast(`打包失败：${err.message}`, 5000);
         }
       } else if (!batchCancel) {
