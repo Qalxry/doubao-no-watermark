@@ -11,6 +11,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      byteimg.com
 // @connect      *.byteimg.com
+// @require      https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js
 // ==/UserScript==
 
 (function () {
@@ -795,41 +796,66 @@
       batchBtn.textContent = "取消下载";
       batchBtn.classList.add("danger");
 
-      for (const cb of selected) {
+      const zip = new JSZip();
+      const folder = zip.folder("豆包无水印图片");
+      let successCount = 0;
+      const total = selected.length;
+
+      for (let i = 0; i < selected.length; i++) {
         if (batchCancel) break;
+        const cb = selected[i];
         const idx = parseInt(cb.dataset.index, 10);
         const item = collectedImages[idx];
         if (!item) continue;
 
         const card = cb.closest(".nomark-card");
         const dlBtn = card?.querySelector(".nomark-action-btn");
-        if (dlBtn) dlBtn.textContent = "下载中";
+        if (dlBtn) dlBtn.textContent = `合并中 ${i + 1}/${total}`;
 
         try {
-          await downloadSingleImage(item.info);
-          if (dlBtn) { dlBtn.classList.add("success"); dlBtn.textContent = "✓ 已下载"; }
+          const blob = await mergeImageToBlob(item.info);
+          const filename = getSafeFilename(item.info);
+          folder.file(filename, blob);
+          successCount++;
+          if (dlBtn) { dlBtn.classList.add("success"); dlBtn.textContent = `✓ ${successCount}/${total}`; }
         } catch (err) {
           if (dlBtn) dlBtn.textContent = "失败";
           console.error("[无水印] 批量下载失败:", err);
         }
-        setTimeout(() => { if (dlBtn) { dlBtn.classList.remove("success"); dlBtn.textContent = "下载"; } }, 2000);
+      }
+
+      if (successCount > 0 && !batchCancel) {
+        batchBtn.textContent = "打包中…";
+        try {
+          const zipBlob = await zip.generateAsync({ type: "blob" });
+          const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+          downloadBlob(zipBlob, `豆包无水印图片_${timestamp}.zip`);
+          showToast(`打包完成！共 ${successCount} 张图片`);
+        } catch (err) {
+          showToast(`打包失败：${err.message}`, 5000);
+        }
+      } else if (!batchCancel) {
+        showToast("没有成功合并的图片", 3000);
       }
 
       batchDownloading = false;
       batchBtn.textContent = "批量下载";
       batchBtn.classList.remove("danger");
-      if (!batchCancel) showToast("批量下载完成！");
     });
   }
 
-  async function downloadSingleImage(imageInfo) {
+  async function mergeImageToBlob(imageInfo) {
     const urlA = imageInfo.previewImage.url;
     const urlB = imageInfo.downloadImage.url;
     if (!isFetchableImageUrl(urlA) || !isFetchableImageUrl(urlB)) {
       throw new Error("图片地址无效");
     }
     const [blobA, blobB] = await Promise.all([gmFetchBlob(urlA), gmFetchBlob(urlB)]);
-    const merged = await mergeImages(blobA, blobB);
+    return mergeImages(blobA, blobB);
+  }
+
+  async function downloadSingleImage(imageInfo) {
+    const merged = await mergeImageToBlob(imageInfo);
     const filename = getSafeFilename(imageInfo);
     downloadBlob(merged, filename);
   }
