@@ -878,10 +878,15 @@
         batchBtn.textContent = "打包中…";
         console.log(`[无水印] 开始打包 ${successCount} 张图片…`);
         try {
-          const zipBlob = await zip.generateAsync({
-            type: "blob",
+          const zipUint8 = await zip.generateAsync({
+            type: "uint8array",
             compression: "STORE",
+            onUpdate: (meta) => {
+              console.log(`[无水印] 打包进度: ${meta.percent.toFixed(1)}%`);
+            },
           });
+          console.log(`[无水印] generateAsync 完成，uint8 长度: ${zipUint8.length}`);
+          const zipBlob = new Blob([zipUint8], { type: "application/zip" });
           console.log(`[无水印] 打包完成，zip 大小: ${(zipBlob.size / 1024).toFixed(1)} KB`);
           const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
           downloadBlob(zipBlob, `豆包无水印图片_${timestamp}.zip`);
