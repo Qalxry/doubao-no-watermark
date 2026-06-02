@@ -1262,15 +1262,15 @@
     let blob;
     if (downloadMode === "direct" && directUrl) {
       console.log("[无水印] 单图下载：API 直链模式", directUrl);
-      showToast("正在通过 API 直链下载…", 0);
+      showToast("正在通过 API 直链下载…");
       blob = await gmFetchBlob(directUrl);
     } else {
       if (downloadMode === "direct") {
         console.log("[无水印] 单图下载：无直链，回退到重叠合并");
-        showToast("该图片无 API 直链，回退到重叠去水印…", 0);
+        showToast("该图片无 API 直链，回退到重叠去水印…");
       } else {
         console.log("[无水印] 单图下载：重叠去水印模式");
-        showToast("正在重叠合并去水印…", 0);
+        showToast("正在重叠合并去水印…");
       }
       blob = await mergeImageToBlob(imageInfo);
     }
