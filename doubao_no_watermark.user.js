@@ -914,7 +914,8 @@
       ? "当前模式：API 直链；如果该图片没有直链，会自动回退到重叠去水印"
       : "当前模式：重叠去水印";
 
-    btn.style.cssText += "color:#ff6060;cursor:pointer;";
+    btn.style.color = "#ff6060";
+    btn.style.cursor = "pointer";
 
     btn.innerHTML = `
       <span role="img" style="margin-right:8px;display:inline-flex;vertical-align:middle;">
