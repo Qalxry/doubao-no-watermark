@@ -1274,14 +1274,6 @@
           letter-spacing: .01em;
           white-space: nowrap;
         }
-        .nomark-title-pill {
-          padding: 3px 8px;
-          border-radius: 999px;
-          background: var(--nomark-accent-soft);
-          color: var(--nomark-accent);
-          font-size: 11px;
-          font-weight: 800;
-        }
         .nomark-title-sub {
           margin-top: 5px;
           color: var(--nomark-muted);
@@ -1671,10 +1663,7 @@
             <div class="nomark-title-line">
               <div class="nomark-title-icon">${NOMARK_ICON_SVG}</div>
               <div class="nomark-title-text">
-                <div class="nomark-title-main">
-                  无水印图片管理
-                  <span class="nomark-title-pill">UI 重写版</span>
-                </div>
+                <div class="nomark-title-main">无水印图片管理</div>
                 <div class="nomark-title-sub">右键菜单与管理面板共用去水印模式，API 直链不可用时会自动回退合并。</div>
               </div>
             </div>
@@ -1704,6 +1693,7 @@
         <div class="nomark-modal-footer">
           <div class="nomark-footer-left">
             <span>提示：点击缩略图可以快速选择图片</span>
+            <span style="margin-left:12px;color:#999;">由于页面加载机制，历史图片可能需要手动往上翻阅触发加载</span>
           </div>
           <div class="nomark-footer-right">
             <span class="nomark-kbd">Esc</span><span>关闭</span>
