@@ -567,7 +567,12 @@
     if (!info?.previewImage?.url || !info?.downloadImage?.url) return false;
     const key = getImageKeyForDedup(info);
     if (!key) return false;
-    if (collectedImages.some(item => getImageKeyForDedup(item.info) === key)) return false;
+    const existing = collectedImages.find(item => getImageKeyForDedup(item.info) === key);
+    if (existing) {
+      // 已有项无 DOM 引用而新扫描有，更新引用
+      if (element && !existing.element) existing.element = element;
+      return false;
+    }
     collectedImages.push({ info, thumbnailUrl: info.previewImage.url, element: element || null });
     updateModalCount();
     return true;
@@ -1182,7 +1187,7 @@
       `;
     }).join("");
 
-    container.querySelectorAll(".nomark-action-btn").forEach(btn => {
+    container.querySelectorAll(".nomark-action-btn:not(.btn-locate)").forEach(btn => {
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
         const idx = parseInt(btn.dataset.index, 10);
