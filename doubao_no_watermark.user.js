@@ -908,8 +908,6 @@
 
     const btn = document.createElement("div");
     btn.className = `${existingItemClass || ""} tm-no-watermark-btn`.trim();
-    btn.setAttribute("role", "menuitem");
-    btn.setAttribute("tabindex", "0");
     btn.title = downloadMode === "direct"
       ? "当前模式：API 直链；如果该图片没有直链，会自动回退到重叠去水印"
       : "当前模式：重叠去水印";
