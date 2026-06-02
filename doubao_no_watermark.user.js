@@ -1190,6 +1190,15 @@
           const isDirect = downloadMode === "direct" && item.directUrl;
           if (dlBtn) dlBtn.textContent = isDirect ? `下载中 ${i + 1}/${total}` : `合并中 ${i + 1}/${total}`;
           console.log(`[无水印] 正在${isDirect ? "下载" : "合并"}第 ${i + 1}/${total} 张图片…`);
+          if (i === 0) {
+            if (isDirect) {
+              showToast("批量下载：API 直链模式", 2000);
+            } else if (downloadMode === "direct") {
+              showToast("批量下载：部分图片无直链，回退到重叠合并", 2000);
+            } else {
+              showToast("批量下载：重叠去水印模式", 2000);
+            }
+          }
           let blob;
           if (isDirect) {
             blob = await gmFetchBlob(item.directUrl);
@@ -1253,9 +1262,16 @@
     let blob;
     if (downloadMode === "direct" && directUrl) {
       console.log("[无水印] 单图下载：API 直链模式", directUrl);
+      showToast("正在通过 API 直链下载…", 0);
       blob = await gmFetchBlob(directUrl);
     } else {
-      console.log("[无水印] 单图下载：重叠去水印模式", downloadMode === "direct" ? "(无直链，回退合并)" : "");
+      if (downloadMode === "direct") {
+        console.log("[无水印] 单图下载：无直链，回退到重叠合并");
+        showToast("该图片无 API 直链，回退到重叠去水印…", 0);
+      } else {
+        console.log("[无水印] 单图下载：重叠去水印模式");
+        showToast("正在重叠合并去水印…", 0);
+      }
       blob = await mergeImageToBlob(imageInfo);
     }
     const filename = getSafeFilename(imageInfo);
