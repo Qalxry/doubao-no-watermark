@@ -201,9 +201,10 @@
   }
 
   function extractImagesFromStreamChunk(json) {
-    // 路径 1: patch_op 格式（初次生成）
+    let creations = [];
+
+    // 处理 patch_op 格式（初次生成）
     if (json.patch_op) {
-      let creations = [];
       for (const op of json.patch_op) {
         const blocks = op.patch_value?.content_block;
         if (Array.isArray(blocks)) {
@@ -223,42 +224,39 @@
           } catch (_) {}
         }
       }
-      for (const creation of creations) {
-        if (creation.image) addCollectedImageFromApi(creation.image);
-      }
     }
 
-    // 路径 2: event_data 格式（初次生成 + 二次编辑）
+    // 处理 event_data 格式（二次编辑）
     if (json.event_data) {
       try {
         const eventData = typeof json.event_data === "string" ? JSON.parse(json.event_data) : json.event_data;
-        const msg = eventData?.message;
-        if (!msg?.content) return;
-        const content = typeof msg.content === "string" ? JSON.parse(msg.content) : msg.content;
-
-        // 初次生成: content.creations[]
-        if (Array.isArray(content.creations)) {
-          for (const creation of content.creations) {
-            if (creation.image) addCollectedImageFromApi(creation.image);
-          }
-        }
-
-        // 二次编辑: content.data[] 包含 image_thumb + image_ori
-        if (Array.isArray(content.data)) {
-          for (const item of content.data) {
-            if (item.image_ori || item.image_thumb) {
-              addCollectedImageFromApi(item);
+        const content = eventData?.message?.content;
+        if (content) {
+          const parsed = typeof content === "string" ? JSON.parse(content) : content;
+          // 二次编辑返回 data[] 数组，包含 image_thumb + image_ori
+          if (Array.isArray(parsed.data)) {
+            for (const item of parsed.data) {
+              if (item.image_ori || item.image_thumb) {
+                addCollectedImageFromApi(item);
+              }
             }
+          }
+          // 也尝试 creations 格式
+          if (Array.isArray(parsed.creations)) {
+            creations.push(...parsed.creations);
           }
         }
       } catch (_) {}
     }
+
+    for (const creation of creations) {
+      if (creation.image) addCollectedImageFromApi(creation.image);
+    }
   }
 
   function addCollectedImageFromApi(imageObj) {
-    // 尝试从 API 返回的 image 对象中构造 imageInfo 格式
     const info = normalizeImageInfo(imageObj);
-    if (info) addCollectedImage(info);
+    if (info) addCollectedImage(info, null);
   }
 
   // ── GM 跨域请求，返回 Blob（绕过 CORS）─────────────────────────────────────
@@ -565,12 +563,12 @@
     return info?.key || extractImageKey(info?.previewImage?.url) || extractImageKey(info?.downloadImage?.url) || "";
   }
 
-  function addCollectedImage(info) {
+  function addCollectedImage(info, element) {
     if (!info?.previewImage?.url || !info?.downloadImage?.url) return false;
     const key = getImageKeyForDedup(info);
     if (!key) return false;
     if (collectedImages.some(item => getImageKeyForDedup(item.info) === key)) return false;
-    collectedImages.push({ info, thumbnailUrl: info.previewImage.url });
+    collectedImages.push({ info, thumbnailUrl: info.previewImage.url, element: element || null });
     updateModalCount();
     return true;
   }
@@ -584,7 +582,7 @@
 
     for (const el of elements) {
       const info = getImageInfoFromElement(el, el.currentSrc || el.src || "");
-      if (info) addCollectedImage(info);
+      if (info) addCollectedImage(info, el);
     }
   }
 
@@ -1001,6 +999,8 @@
         }
         .nomark-action-btn:hover { background: #f7f7f7; border-color: #1f1f1f; }
         .nomark-action-btn.success { background: #f0fdf4; border-color: #86efac; color: #166534; }
+        .nomark-action-btn:disabled { color: #c0c0c0; cursor: not-allowed; border-color: #f0f0f0; background: #fafafa; }
+        .nomark-action-btn:disabled:hover { background: #fafafa; border-color: #f0f0f0; }
         .nomark-select {
           width: 14px; height: 14px; margin: 0 0 0 auto; accent-color: #1f1f1f; cursor: pointer;
         }
@@ -1166,6 +1166,7 @@
     container.innerHTML = collectedImages.map((item, index) => {
       const info = item.info;
       const resolution = (info.width && info.height) ? `${info.width} × ${info.height}` : "";
+      const hasElement = Boolean(item.element);
       return `
         <div class="nomark-card">
           <div class="nomark-preview">
@@ -1174,6 +1175,7 @@
           </div>
           <div class="nomark-actions">
             <button class="nomark-action-btn" data-index="${index}">下载</button>
+            <button class="nomark-action-btn btn-locate" data-index="${index}" ${hasElement ? "" : "disabled"}>定位</button>
             <input class="nomark-select" type="checkbox" data-index="${index}" aria-label="选择图片 ${index + 1}">
           </div>
         </div>
@@ -1197,6 +1199,32 @@
           showToast(`下载失败：${err.message}`, 3000);
         }
         setTimeout(() => { btn.classList.remove("success"); btn.textContent = "下载"; }, 2000);
+      });
+    });
+
+    container.querySelectorAll(".btn-locate").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.index, 10);
+        const item = collectedImages[idx];
+        if (!item?.element) return;
+
+        closeModal();
+        setTimeout(() => {
+          if (!item.element.isConnected) {
+            showToast("图片已不在页面上", 3000);
+            return;
+          }
+          item.element.scrollIntoView({ behavior: "smooth", block: "center" });
+          // 高亮闪烁效果
+          const orig = item.element.style.outline;
+          item.element.style.outline = "3px solid #ff6060";
+          item.element.style.outlineOffset = "2px";
+          setTimeout(() => {
+            item.element.style.outline = orig;
+            item.element.style.outlineOffset = "";
+          }, 2000);
+        }, 300);
       });
     });
 
