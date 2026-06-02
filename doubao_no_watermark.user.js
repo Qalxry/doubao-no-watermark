@@ -30,6 +30,7 @@
       const nameBytes = encoder.encode(file.name);
       const nameLen = nameBytes.length;
       const dataLen = file.data.length;
+      const crc = crc32(file.data);
 
       // local file header (30 + nameLen bytes)
       const header = new ArrayBuffer(30 + nameLen);
@@ -40,14 +41,14 @@
       hv.setUint16(8, 0, true);            // compression method (STORE)
       hv.setUint16(10, 0, true);           // mod time
       hv.setUint16(12, 0, true);           // mod date
-      hv.setUint32(14, crc32(file.data), true);  // crc32
+      hv.setUint32(14, crc, true);         // crc32
       hv.setUint32(18, dataLen, true);     // compressed size
       hv.setUint32(22, dataLen, true);     // uncompressed size
       hv.setUint16(26, nameLen, true);     // filename length
       hv.setUint16(28, 0, true);           // extra field length
       new Uint8Array(header).set(nameBytes, 30);
 
-      entries.push({ nameBytes, nameLen, dataLen, offset });
+      entries.push({ nameBytes, nameLen, dataLen, crc, offset });
       parts.push(new Uint8Array(header));
       parts.push(file.data);
       offset += 30 + nameLen + dataLen;
@@ -66,7 +67,7 @@
       dv.setUint16(10, 0, true);            // compression (STORE)
       dv.setUint16(12, 0, true);            // mod time
       dv.setUint16(14, 0, true);            // mod date
-      dv.setUint32(16, crc32(files[i].data), true);  // crc32
+      dv.setUint32(16, e.crc, true);         // crc32
       dv.setUint32(20, e.dataLen, true);    // compressed
       dv.setUint32(24, e.dataLen, true);    // uncompressed
       dv.setUint16(28, e.nameLen, true);    // name len
@@ -164,6 +165,12 @@
   const MAX_OBJECT_DEPTH = 7;
   const MAX_OBJECT_KEYS = 140;
 
+  // ── 常量 ──────────────────────────────────────────────────────────────────
+  const SCAN_INTERVAL_MS = 3000;           // 图片扫描间隔
+  const CAPTURE_TTL_MS = 5 * 60 * 1000;   // 右键捕获的图片信息有效期
+  const MERGE_TIMEOUT_MS = 30000;          // 单张图片合并超时
+  const MIN_ELEMENT_SIZE = 40;             // 最小可扫描元素尺寸(px)
+
   function isObject(value) {
     return value !== null && typeof value === "object";
   }
@@ -173,7 +180,7 @@
   }
 
   function isFetchableImageUrl(url) {
-    return typeof url === "string" && /^https?:\/\//i.test(url) && /byteimg\.com\//i.test(url);
+    return typeof url === "string" && /^https:\/\/([a-z0-9-]+\.)?byteimg\.com\//i.test(url);
   }
 
   function toImageObject(value) {
@@ -400,7 +407,7 @@
     const elements = [...document.querySelectorAll("canvas,img")]
       .filter(el => {
         const rect = el.getBoundingClientRect();
-        return rect.width >= 40 && rect.height >= 40 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
+        return rect.width >= MIN_ELEMENT_SIZE && rect.height >= MIN_ELEMENT_SIZE && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
       })
       .sort((a, b) => {
         const ra = a.getBoundingClientRect();
@@ -437,7 +444,7 @@
     const elements = [...document.querySelectorAll("canvas,img")]
       .filter(el => {
         const rect = el.getBoundingClientRect();
-        return rect.width >= 40 && rect.height >= 40;
+        return rect.width >= MIN_ELEMENT_SIZE && rect.height >= MIN_ELEMENT_SIZE;
       });
 
     for (const el of elements) {
@@ -450,7 +457,7 @@
   let scanTimer = null;
   function startScanning() {
     if (scanTimer) return;
-    scanTimer = setInterval(scanAndCollectImages, 3000);
+    scanTimer = setInterval(scanAndCollectImages, SCAN_INTERVAL_MS);
     scanAndCollectImages();
   }
 
@@ -464,8 +471,15 @@
       }
     }
   });
-  scanObserver.observe(document.body, { childList: true, subtree: true });
-  startScanning();
+  if (document.body) {
+    scanObserver.observe(document.body, { childList: true, subtree: true });
+    startScanning();
+  } else {
+    document.addEventListener("DOMContentLoaded", () => {
+      scanObserver.observe(document.body, { childList: true, subtree: true });
+      startScanning();
+    });
+  }
 
   // ── Toast ──────────────────────────────────────────────────────────────────
   const toastDiv = document.createElement("div");
@@ -479,7 +493,7 @@
   document.body.appendChild(toastDiv);
 
   function showToast(message, duration = 3000) {
-    toastDiv.innerHTML = message;
+    toastDiv.textContent = message;
     clearTimeout(toastDiv._hideTimer);
     toastDiv.style.display = "block";
     toastDiv.style.opacity = "1";
@@ -590,7 +604,7 @@
   }
 
   function getSelectedImageInfo() {
-    if (capturedImageInfo && Date.now() - capturedAt < 5 * 60 * 1000) return capturedImageInfo;
+    if (capturedImageInfo && Date.now() - capturedAt < CAPTURE_TTL_MS) return capturedImageInfo;
     const visibleInfo = getBestVisibleImageInfo();
     if (visibleInfo) {
       capturedImageInfo = visibleInfo;
@@ -633,7 +647,7 @@
   }
 
   // ── 注入右键菜单项 ─────────────────────────────────────────────────────────
-  const mo = new MutationObserver(() => {
+  const menuObserver = new MutationObserver(() => {
     if (!lastContextMenuHadImage && Date.now() - capturedAt > 1500) return;
 
     const menu = findContextMenuRoot();
@@ -693,7 +707,9 @@
     menu.appendChild(btn);
   });
 
-  mo.observe(document.body, { childList: true, subtree: true });
+  if (document.body) {
+    menuObserver.observe(document.body, { childList: true, subtree: true });
+  }
 
   // ── 悬浮按钮 + 模态框 UI ──────────────────────────────────────────────────
   const NOMARK_BUTTON_HOST_ID = "doubao-nomark-button-host";
@@ -926,7 +942,7 @@
           console.log(`[无水印] 正在合并第 ${i + 1}/${total} 张图片…`);
           const blob = await Promise.race([
             mergeImageToBlob(item.info),
-            new Promise((_, reject) => setTimeout(() => reject(new Error("图片合并超时(30s)")), 30000)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("图片合并超时(30s)")), MERGE_TIMEOUT_MS)),
           ]);
           const baseFilename = getSafeFilename(item.info);
           const ext = baseFilename.lastIndexOf(".");
