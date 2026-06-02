@@ -37,7 +37,7 @@
       const hv = new DataView(header);
       hv.setUint32(0, 0x04034b50, true);  // signature
       hv.setUint16(4, 20, true);           // version needed
-      hv.setUint16(6, 0, true);            // flags
+      hv.setUint16(6, 0x0800, true);       // flags (bit 11 = UTF-8)
       hv.setUint16(8, 0, true);            // compression method (STORE)
       hv.setUint16(10, 0, true);           // mod time
       hv.setUint16(12, 0, true);           // mod date
@@ -63,7 +63,7 @@
       dv.setUint32(0, 0x02014b50, true);   // signature
       dv.setUint16(4, 20, true);            // version made by
       dv.setUint16(6, 20, true);            // version needed
-      dv.setUint16(8, 0, true);             // flags
+      dv.setUint16(8, 0x0800, true);        // flags (bit 11 = UTF-8)
       dv.setUint16(10, 0, true);            // compression (STORE)
       dv.setUint16(12, 0, true);            // mod time
       dv.setUint16(14, 0, true);            // mod date
