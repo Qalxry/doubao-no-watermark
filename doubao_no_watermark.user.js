@@ -16,6 +16,14 @@
 (function () {
   "use strict";
 
+  // ── 脚本架构概述 ──────────────────────────────────────────────────────────
+  // 1. ZIP 打包器：纯同步实现，不依赖 JSZip（豆包页面 polyfill 会卡死 JSZip）
+  // 2. API 拦截：XHR 拦截 /im/chain/single（历史消息），Fetch 拦截 /chat/completion（实时生成）
+  // 3. React Fiber 遍历：从 img/canvas 元素的 Fiber 树中提取 previewImage + downloadImage URL 对
+  // 4. 图片合并去水印：previewImage（左上水印）+ downloadImage（右下水印）拼合为无水印图片
+  // 5. 收集系统：DOM 扫描 + API 拦截双通道采集，按图片 key 去重，上限 200 条
+  // 6. UI：悬浮按钮 + 管理面板（图片网格、模式切换、批量下载、定位跳转）
+
   // ── 最小化 ZIP 打包器（STORE 模式，无外部依赖）────────────────────────────
   // 纯同步实现，不受页面 polyfill 影响
   function buildZip(files) {
@@ -128,7 +136,11 @@
     return (crc ^ 0xffffffff) >>> 0;
   }
 
-  // ── API 拦截：从聊天接口响应中提取图片信息（解决懒加载问题）──────────────────
+  // ── API 拦截 ──────────────────────────────────────────────────────────────
+  // 双通道拦截解决懒加载问题：页面未滚动到的图片不会渲染到 DOM，
+  // 但 API 响应中包含所有图片信息，拦截后可提前收集。
+  // - XHR 拦截 /im/chain/single：获取历史聊天中的图片
+  // - Fetch 拦截 /chat/completion：实时捕获生成中的图片（异步 clone 读取，不阻塞页面）
   const originalXHROpen = XMLHttpRequest.prototype.open;
   const originalXHRSend = XMLHttpRequest.prototype.send;
 
@@ -143,6 +155,7 @@
         const url = this._nomark_url || "";
         if (url.includes("/im/chain/single")) {
           const data = JSON.parse(this.responseText);
+          // pull_singe_chain_downlink_body 是豆包 API 的原始字段名（singe 疑为 single 的拼写错误）
           const messages = data?.downlink_body?.pull_singe_chain_downlink_body?.messages;
           if (Array.isArray(messages)) {
             extractImagesFromMessages(messages);
@@ -384,9 +397,12 @@
     return Boolean(keyA && keyB && keyA === keyB);
   }
 
+  // 将不同 API 响应格式统一为标准 imageInfo 结构
+  // 豆包 API 返回格式随版本/场景变化，source 回退链兼容多种嵌套结构
   function normalizeImageInfo(raw) {
     if (!isObject(raw)) return null;
 
+    // 优先级：realImageInfo（绘图侧栏）> imageContent > imageInfo > image > data > raw 自身
     const source = raw.realImageInfo
       || raw.imageContent
       || raw.imageInfo
@@ -396,8 +412,9 @@
 
     if (!isObject(source)) return null;
 
-    // 绘图侧栏：previewImage / downloadImage / thumbImage
-    // 改图消息：preview_img / image_ori / image_thumb
+    // previewImage：水印在左上角，右下角干净（用于覆盖的底图）
+    // downloadImage：水印在右下角，左上角干净（用于覆盖的补丁）
+    // 两者合并即可去除水印。字段名因 API 版本而异，用 pickImageObject 依次尝试。
     const previewImage = pickImageObject(
       source.previewImage,
       source.preview_img,
@@ -645,7 +662,9 @@
     return null;
   }
 
-  // 通过虚拟列表 positionMap 精确滚动到指定消息
+  // 通过虚拟列表内部 positionMap 精确滚动到指定消息
+  // 注意：依赖豆包虚拟列表组件的内部实现（positionMap._sections），
+  // 若豆包前端升级依赖版本此功能可能静默失效，不影响核心下载功能。
   function scrollToMessage(messageId) {
     if (!messageId) return false;
     const scroller = document.querySelector(".scroller");
@@ -763,7 +782,10 @@
     }
   }, true);
 
-  // ── 合并：底图=图A(pre)，用图B(dld)左上1/4覆盖 ────────────────────────────
+  // 去水印原理：豆包有两套水印图
+  // - previewImage (pre)：水印在左上角，右下角干净
+  // - downloadImage (dld)：水印在右下角，左上角干净
+  // 合并步骤：以 pre 为底图 → 清除左上 1/4 区域 → 用 dld 的左上 1/4 覆盖
   async function mergeImages(blobA, blobB) {
     const urlA = URL.createObjectURL(blobA);
     const urlB = URL.createObjectURL(blobB);
@@ -978,14 +1000,18 @@
     menuObserver.observe(document.body, { childList: true, subtree: true });
   }
 
-  // ── 悬浮按钮 + 模态框 UI（可可萝风格重写版）──────────────────────────────
+  // ── 悬浮按钮 + 模态框 UI ──────────────────────────────
   // 说明：仅重写前端 UI 与交互状态，不改动图片扫描、合并、下载、ZIP 打包等核心逻辑。
   const NOMARK_BUTTON_HOST_ID = "doubao-nomark-button-host";
   const NOMARK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.65"><path d="M3 13.25v-6.5h18v6.5c0 3.62 0 5.43-1.12 6.55S16.95 20.92 13.33 20.92h-2.66c-3.62 0-5.43 0-6.55-1.12S3 16.87 3 13.25Z"/><path d="m3 6.75.56-.75c1.1-1.47 1.66-2.21 2.45-2.61C6.8 3 7.72 3 9.56 3h4.88c1.84 0 2.76 0 3.55.39.79.4 1.35 1.14 2.45 2.61l.56.75M15.1 13.75s-2.3 3.05-3.1 3.05-3.1-3.05-3.1-3.05M12 16.45v-6.3"/></g></svg>`;
 
   let floatingBtnElement = null;
   let modalElement = null;
-  let downloadMode = "direct"; // "overlay" = 图片重叠, "direct" = API 直链（默认）
+  // 下载模式：右键菜单和模态框共用此状态
+  // "overlay"：重叠去水印（合并 previewImage + downloadImage）
+  // "direct"：API 直链（直接下载 image_ori_raw，无水印原图）
+  // 直链模式下若图片无 directUrl，自动回退到重叠合并
+  let downloadMode = "direct";
   let uiKeydownBound = false;
 
   function escapeHtml(value) {
