@@ -591,6 +591,19 @@
     }
   }
 
+  // 通过图片信息在当前 DOM 中查找匹配的元素
+  function findElementByInfo(targetInfo) {
+    if (!targetInfo) return null;
+    const targetKey = getImageKeyForDedup(targetInfo);
+    if (!targetKey) return null;
+    const elements = document.querySelectorAll("canvas,img");
+    for (const el of elements) {
+      const info = getImageInfoFromElement(el, el.currentSrc || el.src || "");
+      if (info && getImageKeyForDedup(info) === targetKey) return el;
+    }
+    return null;
+  }
+
   // 定期扫描 + MutationObserver 扫描 + URL 变化检测
   let scanTimer = null;
   let lastScanUrl = location.href;
@@ -1212,22 +1225,28 @@
         e.stopPropagation();
         const idx = parseInt(btn.dataset.index, 10);
         const item = collectedImages[idx];
-        if (!item?.element) return;
+        if (!item) return;
+
+        // 在当前 DOM 中查找匹配的元素（虚拟滚动可能导致存储的引用失效）
+        const target = findElementByInfo(item.info) || (item.element?.isConnected ? item.element : null);
+
+        if (!target) {
+          showToast("图片当前未在页面中渲染，请先滚动到该图片附近", 4000);
+          return;
+        }
+
+        // 更新引用
+        item.element = target;
 
         closeModal();
         setTimeout(() => {
-          if (!item.element.isConnected) {
-            showToast("图片已不在页面上", 3000);
-            return;
-          }
-          item.element.scrollIntoView({ behavior: "smooth", block: "center" });
-          // 高亮闪烁效果
-          const orig = item.element.style.outline;
-          item.element.style.outline = "3px solid #ff6060";
-          item.element.style.outlineOffset = "2px";
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          const orig = target.style.outline;
+          target.style.outline = "3px solid #ff6060";
+          target.style.outlineOffset = "2px";
           setTimeout(() => {
-            item.element.style.outline = orig;
-            item.element.style.outlineOffset = "";
+            target.style.outline = orig;
+            target.style.outlineOffset = "";
           }, 2000);
         }, 300);
       });
