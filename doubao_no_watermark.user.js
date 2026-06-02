@@ -257,7 +257,20 @@
 
   function addCollectedImageFromApi(imageObj, messageId) {
     const info = normalizeImageInfo(imageObj);
-    if (info) addCollectedImage(info, null, messageId);
+    if (!info) return;
+    // 提取 image_ori_raw 无水印直链（初次生成 API 可能包含此字段）
+    const rawUrl = extractDirectUrl(imageObj);
+    addCollectedImage(info, null, messageId, rawUrl);
+  }
+
+  function extractDirectUrl(obj) {
+    if (!obj) return null;
+    const candidates = [obj.image_ori_raw, obj.image_raw, obj.originalImage];
+    for (const c of candidates) {
+      if (typeof c === "string" && isFetchableImageUrl(c)) return c;
+      if (c?.url && isFetchableImageUrl(c.url)) return c.url;
+    }
+    return null;
   }
 
   // ── GM 跨域请求，返回 Blob（绕过 CORS）─────────────────────────────────────
@@ -564,7 +577,7 @@
     return info?.key || extractImageKey(info?.previewImage?.url) || extractImageKey(info?.downloadImage?.url) || "";
   }
 
-  function addCollectedImage(info, element, messageId) {
+  function addCollectedImage(info, element, messageId, directUrl) {
     if (!info?.previewImage?.url || !info?.downloadImage?.url) return false;
     const key = getImageKeyForDedup(info);
     if (!key) return false;
@@ -572,9 +585,10 @@
     if (existing) {
       if (element && !existing.element) existing.element = element;
       if (messageId && !existing.messageId) existing.messageId = messageId;
+      if (directUrl && !existing.directUrl) existing.directUrl = directUrl;
       return false;
     }
-    collectedImages.push({ info, thumbnailUrl: info.previewImage.url, element: element || null, messageId: messageId || null });
+    collectedImages.push({ info, thumbnailUrl: info.previewImage.url, element: element || null, messageId: messageId || null, directUrl: directUrl || null });
     updateModalCount();
     return true;
   }
@@ -923,6 +937,7 @@
 
   let floatingBtnElement = null;
   let modalElement = null;
+  let downloadMode = "overlay"; // "overlay" = 图片重叠, "direct" = API 直链
 
   function updateModalCount() {
     if (!floatingBtnElement) return;
@@ -1005,6 +1020,17 @@
           display: flex; align-items: center; justify-content: space-between; gap: 12px;
         }
         .nomark-modal-actions { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+        .nomark-mode-toggle {
+          display: inline-flex; border: 1px solid #e0e0e0; border-radius: 6px;
+          overflow: hidden; margin-bottom: 8px;
+        }
+        .nomark-mode-btn {
+          padding: 4px 10px; border: none; background: #ffffff; color: #6b6b6b;
+          font-size: 11px; font-weight: 500; cursor: pointer; transition: all 0.15s ease;
+        }
+        .nomark-mode-btn:not(:last-child) { border-right: 1px solid #e0e0e0; }
+        .nomark-mode-btn.active { background: #1f1f1f; color: #ffffff; }
+        .nomark-mode-btn:hover:not(.active) { background: #f7f7f7; }
         .nomark-top-btn {
           height: 26px; padding: 0 8px; border: 1px solid #e0e0e0; border-radius: 6px;
           background: #ffffff; color: #1f1f1f; font-size: 12px; font-weight: 500;
@@ -1081,7 +1107,13 @@
       </style>
       <div class="nomark-modal-content">
         <div class="nomark-modal-topbar">
-          <div style="font-weight:600;font-size:14px;">无水印图片管理</div>
+          <div style="display:flex;align-items:center;gap:12px;">
+            <span style="font-weight:600;font-size:14px;">无水印图片管理</span>
+            <div class="nomark-mode-toggle">
+              <button class="nomark-mode-btn active" data-mode="overlay">重叠去水印</button>
+              <button class="nomark-mode-btn" data-mode="direct">API 直链</button>
+            </div>
+          </div>
           <div class="nomark-modal-actions">
             <button class="nomark-top-btn btn-select-all" type="button">全选</button>
             <button class="nomark-top-btn btn-clear-selection" type="button">取消选择</button>
@@ -1108,6 +1140,14 @@
 
     closeBtn.addEventListener("click", closeModal);
     modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
+
+    // 去水印模式切换
+    modal.querySelectorAll(".nomark-mode-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        downloadMode = btn.dataset.mode;
+        modal.querySelectorAll(".nomark-mode-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === downloadMode));
+      });
+    });
 
     selectAllBtn.addEventListener("click", () => {
       container.querySelectorAll(".nomark-select").forEach(cb => cb.checked = true);
@@ -1147,11 +1187,18 @@
         if (dlBtn) dlBtn.textContent = `合并中 ${i + 1}/${total}`;
 
         try {
-          console.log(`[无水印] 正在合并第 ${i + 1}/${total} 张图片…`);
-          const blob = await Promise.race([
-            mergeImageToBlob(item.info),
-            new Promise((_, reject) => setTimeout(() => reject(new Error("图片合并超时(30s)")), MERGE_TIMEOUT_MS)),
-          ]);
+          const isDirect = downloadMode === "direct" && item.directUrl;
+          if (dlBtn) dlBtn.textContent = isDirect ? `下载中 ${i + 1}/${total}` : `合并中 ${i + 1}/${total}`;
+          console.log(`[无水印] 正在${isDirect ? "下载" : "合并"}第 ${i + 1}/${total} 张图片…`);
+          let blob;
+          if (isDirect) {
+            blob = await gmFetchBlob(item.directUrl);
+          } else {
+            blob = await Promise.race([
+              mergeImageToBlob(item.info),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("图片合并超时(30s)")), MERGE_TIMEOUT_MS)),
+            ]);
+          }
           const baseFilename = getSafeFilename(item.info);
           const ext = baseFilename.lastIndexOf(".");
           const filename = ext > 0
@@ -1202,10 +1249,15 @@
     return mergeImages(blobA, blobB);
   }
 
-  async function downloadSingleImage(imageInfo) {
-    const merged = await mergeImageToBlob(imageInfo);
+  async function downloadSingleImage(imageInfo, directUrl) {
+    let blob;
+    if (downloadMode === "direct" && directUrl) {
+      blob = await gmFetchBlob(directUrl);
+    } else {
+      blob = await mergeImageToBlob(imageInfo);
+    }
     const filename = getSafeFilename(imageInfo);
-    downloadBlob(merged, filename);
+    downloadBlob(blob, filename);
   }
 
   function renderModalImages() {
@@ -1250,7 +1302,7 @@
 
         btn.textContent = "下载中";
         try {
-          await downloadSingleImage(item.info);
+          await downloadSingleImage(item.info, item.directUrl);
           btn.classList.add("success");
           btn.textContent = "✓ 已下载";
         } catch (err) {
