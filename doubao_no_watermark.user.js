@@ -453,11 +453,25 @@
     }
   }
 
-  // 定期扫描 + MutationObserver 扫描
+  // 定期扫描 + MutationObserver 扫描 + URL 变化检测
   let scanTimer = null;
+  let lastScanUrl = location.href;
+
+  function checkUrlChange() {
+    if (location.href !== lastScanUrl) {
+      lastScanUrl = location.href;
+      collectedImages.length = 0;
+      updateModalCount();
+      console.log("[无水印] 检测到页面切换，已清空图片缓存");
+    }
+  }
+
   function startScanning() {
     if (scanTimer) return;
-    scanTimer = setInterval(scanAndCollectImages, SCAN_INTERVAL_MS);
+    scanTimer = setInterval(() => {
+      checkUrlChange();
+      scanAndCollectImages();
+    }, SCAN_INTERVAL_MS);
     scanAndCollectImages();
   }
 
