@@ -360,17 +360,21 @@
     return undefined;
   }
 
+  function safeDecodeURIComponent(str) {
+    try { return decodeURIComponent(str); } catch (_) { return str; }
+  }
+
   function extractImageKey(value) {
     if (!value) return "";
     const text = String(value);
     const noQuery = text.split("?")[0].split("~")[0];
     const tosIndex = noQuery.indexOf("tos-");
-    if (tosIndex >= 0) return decodeURIComponent(noQuery.slice(tosIndex).replace(/^\/+/, ""));
+    if (tosIndex >= 0) return safeDecodeURIComponent(noQuery.slice(tosIndex).replace(/^\/+/, ""));
 
     try {
-      return decodeURIComponent(new URL(text, location.href).pathname.replace(/^\/+/, "").split("~")[0]);
+      return safeDecodeURIComponent(new URL(text, location.href).pathname.replace(/^\/+/, "").split("~")[0]);
     } catch (_) {
-      return decodeURIComponent(noQuery.replace(/^\/+/, ""));
+      return safeDecodeURIComponent(noQuery.replace(/^\/+/, ""));
     }
   }
 
