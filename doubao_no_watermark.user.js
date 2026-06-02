@@ -1252,8 +1252,10 @@
   async function downloadSingleImage(imageInfo, directUrl) {
     let blob;
     if (downloadMode === "direct" && directUrl) {
+      console.log("[无水印] 单图下载：API 直链模式", directUrl);
       blob = await gmFetchBlob(directUrl);
     } else {
+      console.log("[无水印] 单图下载：重叠去水印模式", downloadMode === "direct" ? "(无直链，回退合并)" : "");
       blob = await mergeImageToBlob(imageInfo);
     }
     const filename = getSafeFilename(imageInfo);
