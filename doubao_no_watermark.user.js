@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         豆包无水印图片下载
 // @namespace    http://tampermonkey.net/
-// @version      2.2.0-experimental
-// @description  为豆包添加无水印图片下载功能（适配新版 canvas 侧栏与图片消息结构）- 实验性模态框 UI
+// @version      2.3.0
+// @description  为豆包添加无水印图片下载功能（适配新版 canvas 侧栏与图片消息结构）- UI 重写版
 // @author       Qalxry,Zhanghuaimin-233
 // @license      GPL-3.0
 // @supportURL   https://github.com/Qalxry/doubao-no-watermark
@@ -860,10 +860,40 @@
     return semiMenus.at(-1) || null;
   }
 
-  function cloneMenuItemClass(menu) {
+  function getMenuText(el) {
+    return (el?.innerText || el?.textContent || "").replace(/\s+/g, "").trim();
+  }
+
+  function getContextMenuTemplateItem(menu) {
     const candidates = [...menu.querySelectorAll("div,[role='menuitem']")]
-      .filter(el => !el.classList.contains("tm-no-watermark-btn") && (el.innerText || el.textContent || "").trim());
-    return candidates.find(el => el.classList.length > 0)?.className || "";
+      .filter(el => !el.classList.contains("tm-no-watermark-btn") && isVisibleElement(el))
+      .filter(el => {
+        const text = getMenuText(el);
+        // 避免选中包裹整个菜单的父元素，只拿真正的菜单行做模板
+        return text && text.length <= 16;
+      });
+    return candidates.find(el => /下载原图/.test(getMenuText(el))) || candidates.find(el => el.classList.length > 0) || null;
+  }
+
+  function cloneMenuItemClass(menu) {
+    return getContextMenuTemplateItem(menu)?.className || "";
+  }
+
+  function findDownloadOriginalMenuItem(menu) {
+    return [...menu.querySelectorAll("div,[role='menuitem']")]
+      .filter(el => !el.classList.contains("tm-no-watermark-btn") && isVisibleElement(el))
+      .find(el => getMenuText(el) === "下载原图") || null;
+  }
+
+  function getCollectedItemByInfo(info) {
+    if (!info) return null;
+    const key = getImageKeyForDedup(info);
+    if (!key) return null;
+    return collectedImages.find(item => getImageKeyForDedup(item.info) === key) || null;
+  }
+
+  function getDirectUrlForInfo(info) {
+    return getCollectedItemByInfo(info)?.directUrl || null;
   }
 
   // ── 注入右键菜单项 ─────────────────────────────────────────────────────────
@@ -873,79 +903,148 @@
     const menu = findContextMenuRoot();
     if (!menu || menu.querySelector(".tm-no-watermark-btn")) return;
 
-    const existingItemClass = cloneMenuItemClass(menu);
+    const templateItem = findDownloadOriginalMenuItem(menu) || getContextMenuTemplateItem(menu);
+    const existingItemClass = templateItem?.className || cloneMenuItemClass(menu);
 
     const btn = document.createElement("div");
-    btn.className = `${existingItemClass} tm-no-watermark-btn`;
+    btn.className = `${existingItemClass || ""} tm-no-watermark-btn`.trim();
     btn.setAttribute("role", "menuitem");
-    btn.style.cssText += "color:#ff6060;cursor:pointer;";
+    btn.setAttribute("tabindex", "0");
+    btn.title = downloadMode === "direct"
+      ? "当前模式：API 直链；如果该图片没有直链，会自动回退到重叠去水印"
+      : "当前模式：重叠去水印";
+
+    // 不强行改菜单定位，只修正新注入行的 flex 对齐；没有模板类时再补最小 fallback。
+    btn.style.cssText += `
+      color: #ff6060;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      line-height: 1.2;
+      box-sizing: border-box;
+      white-space: nowrap;
+    `;
+    if (!existingItemClass) {
+      btn.style.cssText += "min-height:40px;padding:0 20px;border-radius:8px;";
+    }
+
     btn.innerHTML = `
-      <span role="img" style="margin-right:8px;display:inline-flex;vertical-align:middle;">
-        <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M19.207 12.707a1 1 0 0 0-1.414-1.414L13 16.086V2a1 1 0 1 0-2 0v14.086
-                   l-4.793-4.793a1 1 0 0 0-1.414 1.414l6.5 6.5c.195.195.45.293.706.293
-                   H5a1 1 0 1 0 0 2h14a1 1 0 1 0 0-2h-6.999a1 1 0 0 0 .706-.293z"/>
+      <span role="img" aria-hidden="true" style="width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;line-height:1;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12"/>
+          <path d="m7 10 5 5 5-5"/>
+          <path d="M5 21h14"/>
         </svg>
       </span>
-      下载无水印图片
+      <span style="display:inline-flex;align-items:center;line-height:20px;">下载无水印原图</span>
     `;
 
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       const imageInfo = getSelectedImageInfo();
       if (!imageInfo) {
         showToast("未捕获到图片信息。请在图片或右侧 canvas 大图上右键后再选择此项。", 5000);
         return;
       }
 
-      const urlA = imageInfo.previewImage.url;  // pre_watermark，右下干净
-      const urlB = imageInfo.downloadImage.url; // dld_watermark，左上干净
-      if (!isFetchableImageUrl(urlA) || !isFetchableImageUrl(urlB)) {
-        showToast("图片地址无效，无法下载。", 5000);
-        console.warn("[无水印] 无效图片信息", imageInfo);
-        return;
-      }
-
-      showToast("正在获取图片，请稍候…", 0);
       try {
-        const [blobA, blobB] = await Promise.all([
-          gmFetchBlob(urlA),
-          gmFetchBlob(urlB),
-        ]);
-
-        showToast("正在合并图片…", 0);
-        const merged = await mergeImages(blobA, blobB);
-
-        const filename = getSafeFilename(imageInfo);
-        downloadBlob(merged, filename);
+        // 右键菜单与图片管理弹窗共用 downloadMode。
+        // 当模式为 API 直链但该图片没有 directUrl 时，downloadSingleImage 会自动回退到重叠合并。
+        const directUrl = getDirectUrlForInfo(imageInfo);
+        await downloadSingleImage(imageInfo, directUrl);
         showToast("下载成功！");
       } catch (err) {
         console.error("[无水印下载]", err);
-        showToast(`下载失败：${err.message}`);
+        showToast(`下载失败：${err.message}`, 5000);
       }
     });
 
-    menu.appendChild(btn);
+    btn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") btn.click();
+    });
+
+    if (templateItem?.parentElement) {
+      templateItem.insertAdjacentElement("afterend", btn);
+    } else {
+      menu.appendChild(btn);
+    }
   });
 
   if (document.body) {
     menuObserver.observe(document.body, { childList: true, subtree: true });
   }
 
-  // ── 悬浮按钮 + 模态框 UI ──────────────────────────────────────────────────
+  // ── 悬浮按钮 + 模态框 UI（可可萝风格重写版）──────────────────────────────
+  // 说明：仅重写前端 UI 与交互状态，不改动图片扫描、合并、下载、ZIP 打包等核心逻辑。
   const NOMARK_BUTTON_HOST_ID = "doubao-nomark-button-host";
-  const NOMARK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24"><path d="M0 0h24v24H0z" fill="none"/><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"><path d="M2.5 13.5v-7h19v7c0 3.771 0 5.657-1.172 6.828S17.272 21.5 13.5 21.5h-3c-3.771 0-5.657 0-6.828-1.172S2.5 17.271 2.5 13.5m0-7l.6-.8c1.178-1.57 1.767-2.355 2.611-2.778C6.556 2.5 7.537 2.5 9.5 2.5h5c1.963 0 2.944 0 3.789.422c.845.423 1.433 1.208 2.611 2.778l.6.8"/><path d="M15 14.5s-2.21 3-3 3s-3-3-3-3m3 2.5v-6.5"/></g></svg>`;
+  const NOMARK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.65"><path d="M3 13.25v-6.5h18v6.5c0 3.62 0 5.43-1.12 6.55S16.95 20.92 13.33 20.92h-2.66c-3.62 0-5.43 0-6.55-1.12S3 16.87 3 13.25Z"/><path d="m3 6.75.56-.75c1.1-1.47 1.66-2.21 2.45-2.61C6.8 3 7.72 3 9.56 3h4.88c1.84 0 2.76 0 3.55.39.79.4 1.35 1.14 2.45 2.61l.56.75M15.1 13.75s-2.3 3.05-3.1 3.05-3.1-3.05-3.1-3.05M12 16.45v-6.3"/></g></svg>`;
 
   let floatingBtnElement = null;
   let modalElement = null;
-  let downloadMode = "overlay"; // "overlay" = 图片重叠, "direct" = API 直链
+  let downloadMode = "direct"; // "overlay" = 图片重叠, "direct" = API 直链（默认）
+  let uiKeydownBound = false;
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function cssUrl(value) {
+    return String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "");
+  }
+
+  function getUiStats() {
+    const total = collectedImages.length;
+    const direct = collectedImages.filter(item => item.directUrl).length;
+    const locatable = collectedImages.filter(item => item.element || item.messageId).length;
+    return { total, direct, locatable };
+  }
 
   function updateModalCount() {
-    if (!floatingBtnElement) return;
-    const countEl = floatingBtnElement.querySelector(".count");
-    if (!countEl) return;
-    const count = collectedImages.length;
-    countEl.textContent = String(count);
-    countEl.classList.toggle("show", count > 0);
+    const stats = getUiStats();
+
+    if (floatingBtnElement) {
+      const countEl = floatingBtnElement.querySelector(".count");
+      if (countEl) {
+        countEl.textContent = String(stats.total);
+        countEl.classList.toggle("show", stats.total > 0);
+      }
+      floatingBtnElement.classList.toggle("has-images", stats.total > 0);
+      floatingBtnElement.setAttribute("aria-label", `无水印图片管理，当前 ${stats.total} 张图片`);
+    }
+
+    if (modalElement) {
+      const totalEl = modalElement.querySelector(".nomark-stat-total");
+      const directEl = modalElement.querySelector(".nomark-stat-direct");
+      const locateEl = modalElement.querySelector(".nomark-stat-locate");
+      if (totalEl) totalEl.textContent = String(stats.total);
+      if (directEl) directEl.textContent = String(stats.direct);
+      if (locateEl) locateEl.textContent = String(stats.locatable);
+      updateSelectedCount();
+    }
+  }
+
+  function updateSelectedCount() {
+    if (!modalElement) return;
+    const selectedCount = modalElement.querySelectorAll(".nomark-select:checked").length;
+    const selectedEl = modalElement.querySelector(".nomark-selected-count");
+    const batchBtn = modalElement.querySelector(".btn-batch-download");
+    if (selectedEl) selectedEl.textContent = String(selectedCount);
+    if (batchBtn && !batchBtn.dataset.busy) {
+      batchBtn.textContent = selectedCount > 0 ? `批量下载 ${selectedCount}` : "批量下载";
+    }
+  }
+
+  function setCardSelected(checkbox) {
+    const card = checkbox?.closest?.(".nomark-card");
+    if (card) card.classList.toggle("selected", checkbox.checked);
+    updateSelectedCount();
   }
 
   function createFloatingButton() {
@@ -954,27 +1053,83 @@
     wrapper.innerHTML = `
       <style>
         #${NOMARK_BUTTON_HOST_ID} {
-          position: fixed; right: 24px; bottom: 24px; z-index: 2147483646;
-          display: inline-flex; align-items: center; justify-content: center;
+          --nomark-accent: #ff6060;
+          --nomark-accent-2: #ff9a9a;
+          --nomark-ink: #1f2937;
+          --nomark-muted: #6b7280;
+          --nomark-border: rgba(229, 231, 235, 0.92);
+          --nomark-glass: rgba(255, 255, 255, 0.92);
+          position: fixed;
+          right: 24px;
+          bottom: 24px;
+          z-index: 2147483646;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
         }
         #doubao-nomark-btn {
-          width: 48px; height: 48px; background: #ffffff; border: 1px solid #e0e0e0;
-          border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-          display: flex; align-items: center; justify-content: center; font-size: 20px;
-          cursor: pointer; transition: border-color 0.2s ease, box-shadow 0.2s ease;
-          position: relative; overflow: visible; color: #1f1f1f;
+          position: relative;
+          width: 54px;
+          height: 54px;
+          border: 1px solid var(--nomark-border);
+          border-radius: 18px;
+          color: var(--nomark-ink);
+          background:
+            radial-gradient(circle at 28% 18%, rgba(255, 96, 96, 0.16), transparent 28%),
+            var(--nomark-glass);
+          box-shadow: 0 16px 38px rgba(15, 23, 42, 0.14);
+          backdrop-filter: blur(18px);
+          -webkit-backdrop-filter: blur(18px);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 23px;
+          cursor: pointer;
+          outline: none;
+          overflow: visible;
+          transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease, color .18s ease, background .18s ease;
         }
-        #doubao-nomark-btn:hover { border-color: #1f1f1f; box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+        #doubao-nomark-btn:hover {
+          transform: translateY(-2px) scale(1.02);
+          color: var(--nomark-accent);
+          border-color: rgba(255, 96, 96, 0.42);
+          box-shadow: 0 22px 46px rgba(255, 96, 96, 0.20), 0 12px 28px rgba(15, 23, 42, 0.12);
+        }
+        #doubao-nomark-btn:active { transform: translateY(0) scale(.98); }
+        #doubao-nomark-btn.has-images::after {
+          content: "";
+          position: absolute;
+          inset: -5px;
+          border-radius: 22px;
+          border: 1px solid rgba(255, 96, 96, .26);
+          animation: nomarkPulse 1.8s ease-out infinite;
+          pointer-events: none;
+        }
+        @keyframes nomarkPulse {
+          0% { opacity: .70; transform: scale(.96); }
+          100% { opacity: 0; transform: scale(1.16); }
+        }
         #doubao-nomark-btn .count {
-          position: absolute; top: -7px; right: -6px; z-index: 1;
-          display: none; min-width: 13px; height: 13px; padding: 0 3px;
-          background: #ff4d4f; color: #ffffff; border-radius: 999px;
-          font: 600 8px/13px sans-serif; align-items: center; justify-content: center;
-          text-align: center; pointer-events: none; box-shadow: 0 0 0 1.5px #ffffff;
+          position: absolute;
+          top: -7px;
+          right: -7px;
+          z-index: 1;
+          display: none;
+          min-width: 19px;
+          height: 19px;
+          padding: 0 6px;
+          border-radius: 999px;
+          background: linear-gradient(135deg, var(--nomark-accent), var(--nomark-accent-2));
+          color: #fff;
+          font: 800 10px/19px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          text-align: center;
+          pointer-events: none;
+          box-shadow: 0 0 0 2px #fff, 0 8px 16px rgba(255, 96, 96, .34);
         }
-        #doubao-nomark-btn .count.show { display: flex; }
+        #doubao-nomark-btn .count.show { display: block; }
       </style>
-      <button id="doubao-nomark-btn" type="button" title="无水印图片管理">
+      <button id="doubao-nomark-btn" type="button" title="无水印图片管理" aria-label="无水印图片管理">
         ${NOMARK_ICON_SVG}
         <span class="count" aria-live="polite">0</span>
       </button>
@@ -982,16 +1137,21 @@
     document.body.appendChild(wrapper);
     floatingBtnElement = wrapper.querySelector("#doubao-nomark-btn");
     floatingBtnElement.addEventListener("click", openModal);
+    updateModalCount();
   }
 
   function openModal() {
     if (!modalElement) createModal();
     renderModalImages();
     modalElement.classList.add("show");
+    document.documentElement.classList.add("doubao-nomark-modal-open");
+    updateModalCount();
   }
 
   function closeModal() {
-    if (modalElement) modalElement.classList.remove("show");
+    if (!modalElement) return;
+    modalElement.classList.remove("show");
+    document.documentElement.classList.remove("doubao-nomark-modal-open");
   }
 
   function createModal() {
@@ -1000,132 +1160,526 @@
     modal.innerHTML = `
       <style>
         #doubao-nomark-modal {
-          position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-          background: rgba(0,0,0,0.4); z-index: 10000; display: none;
-          align-items: center; justify-content: center; animation: fadeIn 0.2s ease;
+          --nomark-accent: #ff6060;
+          --nomark-accent-2: #ff9a9a;
+          --nomark-accent-soft: #fff1f1;
+          --nomark-ink: #1f2937;
+          --nomark-muted: #6b7280;
+          --nomark-soft: #f6f7f9;
+          --nomark-border: rgba(229, 231, 235, 0.92);
+          --nomark-card: rgba(255, 255, 255, 0.96);
+          position: fixed;
+          inset: 0;
+          z-index: 2147483645;
+          display: none;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          background: rgba(15, 23, 42, 0.42);
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+          color: var(--nomark-ink);
+          animation: nomarkFadeIn .18s ease both;
         }
         #doubao-nomark-modal.show { display: flex; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes nomarkFadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes nomarkSlideUp {
+          from { opacity: 0; transform: translateY(22px) scale(.985); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
         .nomark-modal-content {
-          background: #ffffff; border-radius: 12px; width: 888px;
-          max-width: calc(100vw - 48px); max-height: 85vh;
-          display: flex; flex-direction: column; overflow: hidden;
-          box-shadow: 0 8px 32px rgba(0,0,0,0.16);
-          animation: slideUp 0.3s cubic-bezier(0.34,1.56,0.64,1);
-          font-size: 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          width: min(960px, calc(100vw - 48px));
+          max-height: min(86vh, 760px);
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+          border-radius: 24px;
+          border: 1px solid rgba(255, 255, 255, 0.68);
+          background:
+            radial-gradient(circle at 12% 0%, rgba(255, 96, 96, .11), transparent 32%),
+            radial-gradient(circle at 84% 10%, rgba(124, 58, 237, .08), transparent 30%),
+            rgba(255, 255, 255, 0.94);
+          box-shadow: 0 30px 80px rgba(15, 23, 42, 0.24);
+          backdrop-filter: blur(24px);
+          -webkit-backdrop-filter: blur(24px);
+          animation: nomarkSlideUp .28s cubic-bezier(.34, 1.56, .64, 1) both;
         }
-        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         .nomark-modal-topbar {
-          padding: 10px 20px 0; border-bottom: 1px solid #e0e0e0;
-          display: flex; align-items: center; justify-content: space-between; gap: 12px;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 16px;
+          padding: 18px 20px 14px;
+          border-bottom: 1px solid var(--nomark-border);
+          background: linear-gradient(180deg, rgba(255, 255, 255, .92), rgba(255, 255, 255, .72));
         }
-        .nomark-modal-actions { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+        .nomark-title-area {
+          min-width: 0;
+          display: grid;
+          gap: 12px;
+        }
+        .nomark-title-line {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          min-width: 0;
+        }
+        .nomark-title-icon {
+          flex: 0 0 auto;
+          width: 38px;
+          height: 38px;
+          border-radius: 15px;
+          display: grid;
+          place-items: center;
+          color: #fff;
+          font-size: 18px;
+          background: linear-gradient(135deg, var(--nomark-accent), var(--nomark-accent-2));
+          box-shadow: 0 12px 24px rgba(255, 96, 96, .26);
+        }
+        .nomark-title-text { min-width: 0; }
+        .nomark-title-main {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 16px;
+          line-height: 1.2;
+          font-weight: 850;
+          letter-spacing: .01em;
+          white-space: nowrap;
+        }
+        .nomark-title-pill {
+          padding: 3px 8px;
+          border-radius: 999px;
+          background: var(--nomark-accent-soft);
+          color: var(--nomark-accent);
+          font-size: 11px;
+          font-weight: 800;
+        }
+        .nomark-title-sub {
+          margin-top: 5px;
+          color: var(--nomark-muted);
+          font-size: 12px;
+          line-height: 1.45;
+        }
+        .nomark-stat-row {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .nomark-stat-card {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          min-height: 28px;
+          padding: 0 10px;
+          border: 1px solid var(--nomark-border);
+          border-radius: 999px;
+          background: rgba(255, 255, 255, .78);
+          color: var(--nomark-muted);
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .nomark-stat-card strong { color: var(--nomark-ink); font-weight: 850; }
+        .nomark-head-actions {
+          display: grid;
+          justify-items: end;
+          gap: 10px;
+          flex: 0 0 auto;
+        }
         .nomark-mode-toggle {
-          display: inline-flex; border: 1px solid #e0e0e0; border-radius: 6px;
-          overflow: hidden; margin-bottom: 8px;
+          display: inline-flex;
+          align-items: center;
+          padding: 4px;
+          border: 1px solid var(--nomark-border);
+          border-radius: 999px;
+          background: rgba(246, 247, 249, .88);
+          gap: 3px;
         }
         .nomark-mode-btn {
-          padding: 4px 10px; border: none; background: #ffffff; color: #6b6b6b;
-          font-size: 11px; font-weight: 500; cursor: pointer; transition: all 0.15s ease;
+          min-height: 30px;
+          padding: 0 13px;
+          border: none;
+          border-radius: 999px;
+          background: transparent;
+          color: var(--nomark-muted);
+          font-size: 12px;
+          font-weight: 800;
+          cursor: pointer;
+          white-space: nowrap;
+          transition: background .16s ease, color .16s ease, box-shadow .16s ease, transform .16s ease;
         }
-        .nomark-mode-btn:not(:last-child) { border-right: 1px solid #e0e0e0; }
-        .nomark-mode-btn.active { background: #1f1f1f; color: #ffffff; }
-        .nomark-mode-btn:hover:not(.active) { background: #f7f7f7; }
+        .nomark-mode-btn:hover:not(.active) { background: #fff; color: var(--nomark-ink); }
+        .nomark-mode-btn.active {
+          background: #1f2937;
+          color: #fff;
+          box-shadow: 0 9px 18px rgba(15, 23, 42, .18);
+        }
+        .nomark-modal-actions {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 7px;
+          flex-wrap: wrap;
+        }
+        .nomark-top-btn,
+        .nomark-close-btn,
+        .nomark-action-btn {
+          appearance: none;
+          font-family: inherit;
+        }
         .nomark-top-btn {
-          height: 26px; padding: 0 8px; border: 1px solid #e0e0e0; border-radius: 6px;
-          background: #ffffff; color: #1f1f1f; font-size: 12px; font-weight: 500;
-          cursor: pointer; transition: all 0.2s ease; white-space: nowrap;
+          height: 32px;
+          padding: 0 12px;
+          border: 1px solid var(--nomark-border);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--nomark-ink);
+          font-size: 12px;
+          font-weight: 800;
+          cursor: pointer;
+          white-space: nowrap;
+          transition: transform .16s ease, background .16s ease, color .16s ease, border-color .16s ease, box-shadow .16s ease;
         }
-        .nomark-top-btn:hover { background: #f7f7f7; border-color: #1f1f1f; }
-        .nomark-top-btn.danger { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
+        .nomark-top-btn:hover {
+          transform: translateY(-1px);
+          border-color: rgba(255, 96, 96, .48);
+          background: var(--nomark-accent-soft);
+          color: var(--nomark-accent);
+        }
+        .nomark-top-btn.primary {
+          color: #fff;
+          border-color: transparent;
+          background: linear-gradient(135deg, var(--nomark-accent), var(--nomark-accent-2));
+          box-shadow: 0 10px 20px rgba(255, 96, 96, .22);
+        }
+        .nomark-top-btn.primary:hover {
+          color: #fff;
+          box-shadow: 0 14px 24px rgba(255, 96, 96, .28);
+        }
+        .nomark-top-btn.danger {
+          color: #9a3412;
+          border-color: #fdba74;
+          background: #fff7ed;
+          box-shadow: none;
+        }
         .nomark-close-btn {
-          width: 26px; height: 26px; background: transparent; border: 1px solid #e0e0e0;
-          border-radius: 6px; cursor: pointer; display: flex; align-items: center;
-          justify-content: center; color: #6b6b6b; font-size: 12px; transition: all 0.2s ease;
+          width: 32px;
+          height: 32px;
+          border: 1px solid var(--nomark-border);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--nomark-muted);
+          font-size: 18px;
+          line-height: 1;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          transition: background .16s ease, color .16s ease, border-color .16s ease, transform .16s ease;
         }
-        .nomark-close-btn:hover { background: #f7f7f7; border-color: #1f1f1f; color: #1f1f1f; }
-        .nomark-modal-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
-        .nomark-modal-body::-webkit-scrollbar { width: 6px; }
+        .nomark-close-btn:hover {
+          transform: rotate(8deg);
+          color: #fff;
+          border-color: #1f2937;
+          background: #1f2937;
+        }
+        .nomark-modal-body {
+          flex: 1;
+          min-height: 0;
+          padding: 18px 20px;
+          overflow-y: auto;
+        }
+        .nomark-modal-body::-webkit-scrollbar { width: 7px; }
         .nomark-modal-body::-webkit-scrollbar-track { background: transparent; }
-        .nomark-modal-body::-webkit-scrollbar-thumb { background: #d0d0d0; border-radius: 3px; }
+        .nomark-modal-body::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 999px; }
         .nomark-media-grid {
-          --card-w: 160px; --preview-h: 160px;
-          display: grid; grid-template-columns: repeat(5, var(--card-w));
-          justify-content: start; gap: 12px;
+          --card-w: 164px;
+          --preview-h: 164px;
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(var(--card-w), 1fr));
+          gap: 14px;
         }
         .nomark-card {
-          position: relative; border-radius: 8px; overflow: hidden;
-          border: 1px solid #e0e0e0; background: #fafafa;
-          transition: all 0.2s ease; display: flex; flex-direction: column;
+          position: relative;
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+          border: 1px solid var(--nomark-border);
+          border-radius: 20px;
+          background: var(--nomark-card);
+          box-shadow: 0 10px 22px rgba(15, 23, 42, .06);
+          transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
         }
-        .nomark-card:hover { border-color: #1f1f1f; }
+        .nomark-card:hover {
+          transform: translateY(-2px);
+          border-color: rgba(255, 96, 96, .52);
+          box-shadow: 0 18px 38px rgba(15, 23, 42, .11);
+        }
+        .nomark-card.selected {
+          border-color: rgba(255, 96, 96, .78);
+          box-shadow: 0 0 0 3px rgba(255, 96, 96, .13), 0 18px 38px rgba(15, 23, 42, .10);
+        }
         .nomark-preview {
-          position: relative; width: 100%; height: var(--preview-h);
-          display: block; background: #f0f0f0; cursor: pointer;
+          position: relative;
+          width: 100%;
+          height: var(--preview-h);
+          overflow: hidden;
+          display: block;
+          cursor: pointer;
+          background:
+            linear-gradient(45deg, #f3f4f6 25%, transparent 25%),
+            linear-gradient(-45deg, #f3f4f6 25%, transparent 25%),
+            linear-gradient(45deg, transparent 75%, #f3f4f6 75%),
+            linear-gradient(-45deg, transparent 75%, #f3f4f6 75%),
+            #fff;
+          background-size: 18px 18px;
+          background-position: 0 0, 0 9px, 9px -9px, -9px 0;
         }
         .nomark-preview img {
-          width: 100%; height: var(--preview-h); object-fit: cover; display: block;
+          width: 100%;
+          height: 100%;
+          display: block;
+          object-fit: cover;
+          transition: transform .22s ease, filter .22s ease;
+        }
+        .nomark-card:hover .nomark-preview img { transform: scale(1.035); filter: saturate(1.04); }
+        .nomark-info,
+        .nomark-card-badge {
+          position: absolute;
+          z-index: 2;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 22px;
+          padding: 0 8px;
+          border-radius: 999px;
+          font-size: 11px;
+          font-weight: 850;
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+        }
+        .nomark-card-badge {
+          top: 8px;
+          left: 8px;
+          background: rgba(255, 255, 255, .86);
+          color: var(--nomark-accent);
+          box-shadow: 0 8px 16px rgba(15, 23, 42, .10);
         }
         .nomark-info {
-          position: absolute; top: 8px; right: 8px; padding: 3px 6px;
-          background: rgba(0,0,0,0.6); border-radius: 4px; font-size: 12px;
-          color: #ffffff; font-weight: 500; opacity: 0; transition: opacity 0.2s ease;
+          top: 8px;
+          right: 8px;
+          max-width: calc(100% - 16px);
+          background: rgba(15, 23, 42, .66);
+          color: #fff;
+          opacity: 0;
+          transform: translateY(-3px);
+          transition: opacity .18s ease, transform .18s ease;
         }
-        .nomark-card:hover .nomark-info { opacity: 1; }
+        .nomark-card:hover .nomark-info { opacity: 1; transform: translateY(0); }
+        .nomark-preview-tip {
+          position: absolute;
+          left: 8px;
+          right: 8px;
+          bottom: 8px;
+          z-index: 2;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          opacity: 0;
+          transform: translateY(6px);
+          transition: opacity .18s ease, transform .18s ease;
+        }
+        .nomark-card:hover .nomark-preview-tip { opacity: 1; transform: translateY(0); }
+        .nomark-preview-tip span {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          max-width: 100%;
+          padding: 5px 8px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, .88);
+          color: var(--nomark-ink);
+          font-size: 11px;
+          font-weight: 800;
+          box-shadow: 0 8px 18px rgba(15, 23, 42, .10);
+        }
         .nomark-actions {
-          display: flex; align-items: center; gap: 6px; padding: 8px;
-          background: #ffffff; border-top: 1px solid #e0e0e0;
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          padding: 10px;
+          border-top: 1px solid var(--nomark-border);
+          background: rgba(255, 255, 255, .92);
         }
         .nomark-action-btn {
-          flex: 0 0 auto; min-width: 52px; padding: 6px 10px;
-          border: 1px solid #e0e0e0; border-radius: 4px; background: #ffffff;
-          color: #1f1f1f; font-size: 12px; font-weight: 500; cursor: pointer;
-          transition: all 0.2s ease;
+          min-width: 54px;
+          height: 30px;
+          padding: 0 11px;
+          border: 1px solid var(--nomark-border);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--nomark-ink);
+          font-size: 12px;
+          font-weight: 850;
+          cursor: pointer;
+          transition: background .16s ease, color .16s ease, border-color .16s ease, transform .16s ease;
         }
-        .nomark-action-btn:hover { background: #f7f7f7; border-color: #1f1f1f; }
-        .nomark-action-btn.success { background: #f0fdf4; border-color: #86efac; color: #166534; }
-        .nomark-action-btn:disabled { color: #c0c0c0; cursor: not-allowed; border-color: #f0f0f0; background: #fafafa; }
-        .nomark-action-btn:disabled:hover { background: #fafafa; border-color: #f0f0f0; }
+        .nomark-action-btn:hover {
+          transform: translateY(-1px);
+          border-color: rgba(255, 96, 96, .52);
+          background: var(--nomark-accent-soft);
+          color: var(--nomark-accent);
+        }
+        .nomark-action-btn.success {
+          border-color: #86efac;
+          background: #f0fdf4;
+          color: #166534;
+        }
+        .nomark-action-btn:disabled,
+        .nomark-action-btn:disabled:hover {
+          transform: none;
+          color: #b8bec8;
+          border-color: #edf0f3;
+          background: #f8fafc;
+          cursor: not-allowed;
+        }
+        .nomark-select-wrap {
+          margin-left: auto;
+          position: relative;
+          width: 20px;
+          height: 20px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
         .nomark-select {
-          width: 14px; height: 14px; margin: 0 0 0 auto; accent-color: #1f1f1f; cursor: pointer;
+          width: 18px;
+          height: 18px;
+          margin: 0;
+          accent-color: var(--nomark-accent);
+          cursor: pointer;
         }
         .nomark-empty {
-          text-align: center; padding: 56px 20px; color: #a0a0a0;
+          grid-column: 1 / -1;
+          min-height: 260px;
+          display: grid;
+          place-items: center;
+          text-align: center;
+          padding: 44px 20px;
+          border: 1px dashed rgba(209, 213, 219, .95);
+          border-radius: 22px;
+          background: rgba(255, 255, 255, .72);
         }
-        .nomark-empty-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
-        .nomark-empty-text { font-size: 12px; color: #6b6b6b; font-weight: 500; }
+        .nomark-empty-icon {
+          width: 66px;
+          height: 66px;
+          margin: 0 auto 14px;
+          display: grid;
+          place-items: center;
+          border-radius: 24px;
+          background: var(--nomark-accent-soft);
+          color: var(--nomark-accent);
+          font-size: 32px;
+        }
+        .nomark-empty-text {
+          color: var(--nomark-ink);
+          font-size: 14px;
+          font-weight: 850;
+        }
+        .nomark-empty-sub {
+          max-width: 360px;
+          margin: 8px auto 0;
+          color: var(--nomark-muted);
+          font-size: 12px;
+          line-height: 1.7;
+        }
         .nomark-modal-footer {
-          padding: 8px 20px; border-top: 1px solid #e0e0e0;
-          display: flex; justify-content: center; align-items: center; gap: 8px;
-          background: #fafafa;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 11px 20px;
+          border-top: 1px solid var(--nomark-border);
+          background: rgba(249, 250, 251, .78);
+          color: #9ca3af;
+          font-size: 12px;
         }
-        .nomark-footer-text { color: #a0a0a0; font-size: 12px; }
+        .nomark-footer-left,
+        .nomark-footer-right {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .nomark-kbd {
+          min-width: 22px;
+          height: 22px;
+          padding: 0 7px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid var(--nomark-border);
+          border-radius: 7px;
+          background: #fff;
+          color: var(--nomark-muted);
+          font-size: 11px;
+          font-weight: 800;
+        }
         @media (max-width: 920px) {
-          .nomark-modal-content { width: calc(100vw - 24px); }
-          .nomark-media-grid { grid-template-columns: repeat(auto-fill, minmax(var(--card-w), var(--card-w))); }
+          #doubao-nomark-modal { padding: 12px; }
+          .nomark-modal-content { width: calc(100vw - 24px); max-height: 88vh; }
+          .nomark-modal-topbar { flex-direction: column; align-items: stretch; }
+          .nomark-head-actions { justify-items: stretch; }
+          .nomark-modal-actions { justify-content: flex-start; }
+          .nomark-title-line { align-items: flex-start; }
+          .nomark-title-main { white-space: normal; }
+          .nomark-media-grid { --card-w: 148px; --preview-h: 148px; }
         }
       </style>
-      <div class="nomark-modal-content">
+      <div class="nomark-modal-content" role="dialog" aria-modal="true" aria-label="无水印图片管理">
         <div class="nomark-modal-topbar">
-          <div style="display:flex;align-items:center;gap:12px;">
-            <span style="font-weight:600;font-size:14px;">无水印图片管理</span>
-            <div class="nomark-mode-toggle">
-              <button class="nomark-mode-btn active" data-mode="overlay">重叠去水印</button>
-              <button class="nomark-mode-btn" data-mode="direct">API 直链</button>
+          <div class="nomark-title-area">
+            <div class="nomark-title-line">
+              <div class="nomark-title-icon">${NOMARK_ICON_SVG}</div>
+              <div class="nomark-title-text">
+                <div class="nomark-title-main">
+                  无水印图片管理
+                  <span class="nomark-title-pill">UI 重写版</span>
+                </div>
+                <div class="nomark-title-sub">右键菜单与管理面板共用去水印模式，API 直链不可用时会自动回退合并。</div>
+              </div>
+            </div>
+            <div class="nomark-stat-row">
+              <span class="nomark-stat-card">已收集 <strong class="nomark-stat-total">0</strong></span>
+              <span class="nomark-stat-card">直链 <strong class="nomark-stat-direct">0</strong></span>
+              <span class="nomark-stat-card">可定位 <strong class="nomark-stat-locate">0</strong></span>
+              <span class="nomark-stat-card">已选择 <strong class="nomark-selected-count">0</strong></span>
             </div>
           </div>
-          <div class="nomark-modal-actions">
-            <button class="nomark-top-btn btn-select-all" type="button">全选</button>
-            <button class="nomark-top-btn btn-clear-selection" type="button">取消选择</button>
-            <button class="nomark-top-btn btn-batch-download" type="button">批量下载</button>
-            <button class="nomark-close-btn" type="button">×</button>
+          <div class="nomark-head-actions">
+            <div class="nomark-mode-toggle" aria-label="下载模式切换">
+              <button class="nomark-mode-btn ${downloadMode === "overlay" ? "active" : ""}" type="button" data-mode="overlay">重叠去水印</button>
+              <button class="nomark-mode-btn ${downloadMode === "direct" ? "active" : ""}" type="button" data-mode="direct">API 直链</button>
+            </div>
+            <div class="nomark-modal-actions">
+              <button class="nomark-top-btn btn-select-all" type="button">全选</button>
+              <button class="nomark-top-btn btn-clear-selection" type="button">取消选择</button>
+              <button class="nomark-top-btn primary btn-batch-download" type="button">批量下载</button>
+              <button class="nomark-close-btn" type="button" title="关闭" aria-label="关闭">×</button>
+            </div>
           </div>
         </div>
         <div class="nomark-modal-body">
           <div class="nomark-media-grid" id="nomark-media-container"></div>
         </div>
         <div class="nomark-modal-footer">
-          <span class="nomark-footer-text">豆包无水印图片下载 · 实验性 UI</span>
+          <div class="nomark-footer-left">
+            <span>提示：点击缩略图可以快速选择图片</span>
+          </div>
+          <div class="nomark-footer-right">
+            <span class="nomark-kbd">Esc</span><span>关闭</span>
+          </div>
         </div>
       </div>
     `;
@@ -1141,19 +1695,34 @@
     closeBtn.addEventListener("click", closeModal);
     modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
 
-    // 去水印模式切换
+    if (!uiKeydownBound) {
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && modalElement?.classList.contains("show")) closeModal();
+      });
+      uiKeydownBound = true;
+    }
+
     modal.querySelectorAll(".nomark-mode-btn").forEach(btn => {
       btn.addEventListener("click", () => {
         downloadMode = btn.dataset.mode;
         modal.querySelectorAll(".nomark-mode-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === downloadMode));
+        renderModalImages();
+        showToast(downloadMode === "direct" ? "已切换为 API 直链模式" : "已切换为重叠去水印模式", 1800);
       });
     });
 
     selectAllBtn.addEventListener("click", () => {
-      container.querySelectorAll(".nomark-select").forEach(cb => cb.checked = true);
+      container.querySelectorAll(".nomark-select").forEach(cb => {
+        cb.checked = true;
+        setCardSelected(cb);
+      });
     });
+
     clearBtn.addEventListener("click", () => {
-      container.querySelectorAll(".nomark-select").forEach(cb => cb.checked = false);
+      container.querySelectorAll(".nomark-select").forEach(cb => {
+        cb.checked = false;
+        setCardSelected(cb);
+      });
     });
 
     let batchDownloading = false;
@@ -1168,8 +1737,10 @@
       console.log(`[无水印] 批量下载开始，共 ${selected.length} 张图片`);
       batchDownloading = true;
       batchCancel = false;
+      batchBtn.dataset.busy = "1";
       batchBtn.textContent = "取消下载";
       batchBtn.classList.add("danger");
+      batchBtn.classList.remove("primary");
 
       const zipFiles = [];
       let successCount = 0;
@@ -1183,8 +1754,8 @@
         if (!item) continue;
 
         const card = cb.closest(".nomark-card");
-        const dlBtn = card?.querySelector(".nomark-action-btn");
-        if (dlBtn) dlBtn.textContent = `合并中 ${i + 1}/${total}`;
+        const dlBtn = card?.querySelector(".nomark-download-btn");
+        if (dlBtn) dlBtn.textContent = `处理中 ${i + 1}/${total}`;
 
         try {
           const isDirect = downloadMode === "direct" && item.directUrl;
@@ -1240,11 +1811,17 @@
         }
       } else if (!batchCancel) {
         showToast("没有成功合并的图片", 3000);
+      } else {
+        showToast("已取消批量下载", 2000);
       }
 
       batchDownloading = false;
+      batchBtn.dataset.busy = "";
+      delete batchBtn.dataset.busy;
       batchBtn.textContent = "批量下载";
       batchBtn.classList.remove("danger");
+      batchBtn.classList.add("primary");
+      updateSelectedCount();
     });
   }
 
@@ -1282,36 +1859,58 @@
     const container = document.querySelector("#nomark-media-container");
     if (!container) return;
 
+    updateModalCount();
+
     if (collectedImages.length === 0) {
       container.innerHTML = `
         <div class="nomark-empty">
-          <div class="nomark-empty-icon">🖼️</div>
-          <div class="nomark-empty-text">暂未发现图片</div>
+          <div>
+            <div class="nomark-empty-icon">🖼️</div>
+            <div class="nomark-empty-text">暂未发现图片</div>
+            <div class="nomark-empty-sub">请先在豆包页面生成或打开图片。插件会自动扫描当前页面，也可以在图片或右侧 canvas 大图上右键触发捕获。</div>
+          </div>
         </div>
       `;
+      updateSelectedCount();
       return;
     }
 
     container.innerHTML = collectedImages.map((item, index) => {
       const info = item.info;
-      const resolution = (info.width && info.height) ? `${info.width} × ${info.height}` : "";
-      const hasElement = Boolean(item.element);
+      const resolution = (info.width && info.height) ? `${info.width} × ${info.height}` : "未知尺寸";
+      const hasElement = Boolean(item.element || item.messageId);
+      const hasDirect = Boolean(item.directUrl);
+      const badge = downloadMode === "direct"
+        ? (hasDirect ? "直链" : "回退")
+        : "合并";
+      const modeTip = downloadMode === "direct"
+        ? (hasDirect ? "API 直链可用" : "无直链，将回退合并")
+        : "重叠合并去水印";
+      const alt = `图片 ${index + 1}`;
       return `
-        <div class="nomark-card">
-          <div class="nomark-preview">
-            <img src="${item.thumbnailUrl}" alt="图片 ${index + 1}" loading="lazy">
-            ${resolution ? `<div class="nomark-info">${resolution}</div>` : ""}
+        <div class="nomark-card" data-index="${index}">
+          <div class="nomark-preview" title="点击选择图片">
+            <img src="${escapeHtml(item.thumbnailUrl)}" alt="${escapeHtml(alt)}" loading="lazy">
+            <span class="nomark-card-badge">${escapeHtml(badge)}</span>
+            <span class="nomark-info">${escapeHtml(resolution)}</span>
+            <div class="nomark-preview-tip"><span>${escapeHtml(modeTip)}</span></div>
           </div>
           <div class="nomark-actions">
-            <button class="nomark-action-btn" data-index="${index}">下载</button>
+            <button class="nomark-action-btn nomark-download-btn" data-index="${index}">下载</button>
             <button class="nomark-action-btn btn-locate" data-index="${index}" ${hasElement ? "" : "disabled"}>定位</button>
-            <input class="nomark-select" type="checkbox" data-index="${index}" aria-label="选择图片 ${index + 1}">
+            <label class="nomark-select-wrap" title="选择图片 ${index + 1}">
+              <input class="nomark-select" type="checkbox" data-index="${index}" aria-label="选择图片 ${index + 1}">
+            </label>
           </div>
         </div>
       `;
     }).join("");
 
-    container.querySelectorAll(".nomark-action-btn:not(.btn-locate)").forEach(btn => {
+    container.querySelectorAll(".nomark-select").forEach(cb => {
+      cb.addEventListener("change", () => setCardSelected(cb));
+    });
+
+    container.querySelectorAll(".nomark-download-btn").forEach(btn => {
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
         const idx = parseInt(btn.dataset.index, 10);
@@ -1319,6 +1918,7 @@
         if (!item) return;
 
         btn.textContent = "下载中";
+        btn.disabled = true;
         try {
           await downloadSingleImage(item.info, item.directUrl);
           btn.classList.add("success");
@@ -1326,8 +1926,13 @@
         } catch (err) {
           btn.textContent = "失败";
           showToast(`下载失败：${err.message}`, 3000);
+        } finally {
+          setTimeout(() => {
+            btn.disabled = false;
+            btn.classList.remove("success");
+            btn.textContent = "下载";
+          }, 2000);
         }
-        setTimeout(() => { btn.classList.remove("success"); btn.textContent = "下载"; }, 2000);
       });
     });
 
@@ -1341,10 +1946,7 @@
         closeModal();
 
         setTimeout(() => {
-          // 优先通过 positionMap 精确滚动到消息位置（虚拟滚动下仍有效）
           const scrolled = item.messageId && scrollToMessage(item.messageId);
-
-          // 等待虚拟列表渲染完成后高亮
           const waitMs = scrolled ? 800 : 300;
           setTimeout(() => {
             const target = findElementByInfo(item.info) || (item.element?.isConnected ? item.element : null);
@@ -1352,11 +1954,12 @@
               item.element = target;
               if (!scrolled) target.scrollIntoView({ behavior: "smooth", block: "center" });
               const orig = target.style.outline;
+              const origOffset = target.style.outlineOffset;
               target.style.outline = "3px solid #ff6060";
-              target.style.outlineOffset = "2px";
+              target.style.outlineOffset = "3px";
               setTimeout(() => {
                 target.style.outline = orig;
-                target.style.outlineOffset = "";
+                target.style.outlineOffset = origOffset;
               }, 2000);
             } else if (!scrolled) {
               showToast("图片当前未在页面中渲染", 3000);
@@ -1366,13 +1969,17 @@
       });
     });
 
-    container.querySelectorAll(".nomark-preview img").forEach(img => {
-      img.addEventListener("click", () => {
-        const card = img.closest(".nomark-card");
-        const cb = card?.querySelector(".nomark-select");
-        if (cb) cb.checked = !cb.checked;
+    container.querySelectorAll(".nomark-preview").forEach(preview => {
+      preview.addEventListener("click", () => {
+        const cb = preview.closest(".nomark-card")?.querySelector(".nomark-select");
+        if (cb) {
+          cb.checked = !cb.checked;
+          setCardSelected(cb);
+        }
       });
     });
+
+    updateSelectedCount();
   }
 
   createFloatingButton();
