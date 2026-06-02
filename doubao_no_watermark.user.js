@@ -571,7 +571,9 @@
   }
 
   // ── 图片收集系统 ─────────────────────────────────────────────────────────
-  const collectedImages = []; // 存储 { info, thumbnailUrl } 对象
+  const collectedImages = [];
+  const collectedImagesMap = new Map(); // key → index, O(1) 去重
+  const MAX_COLLECTED_IMAGES = 200;     // 容量上限，防内存泄漏
 
   function getImageKeyForDedup(info) {
     return info?.key || extractImageKey(info?.previewImage?.url) || extractImageKey(info?.downloadImage?.url) || "";
@@ -581,26 +583,33 @@
     if (!info?.previewImage?.url || !info?.downloadImage?.url) return false;
     const key = getImageKeyForDedup(info);
     if (!key) return false;
-    const existing = collectedImages.find(item => getImageKeyForDedup(item.info) === key);
-    if (existing) {
+    const existingIdx = collectedImagesMap.get(key);
+    if (existingIdx !== undefined) {
+      const existing = collectedImages[existingIdx];
       if (element && !existing.element) existing.element = element;
       if (messageId && !existing.messageId) existing.messageId = messageId;
       if (directUrl && !existing.directUrl) existing.directUrl = directUrl;
       return false;
     }
+    if (collectedImages.length >= MAX_COLLECTED_IMAGES) return false;
+    collectedImagesMap.set(key, collectedImages.length);
     collectedImages.push({ info, thumbnailUrl: info.previewImage.url, element: element || null, messageId: messageId || null, directUrl: directUrl || null });
     updateModalCount();
     return true;
   }
 
+  const scannedElements = new WeakSet(); // 跳过已处理元素，避免重复 Fiber 遍历
+
   function scanAndCollectImages() {
     const elements = [...document.querySelectorAll("canvas,img")]
       .filter(el => {
+        if (scannedElements.has(el)) return false;
         const rect = el.getBoundingClientRect();
         return rect.width >= MIN_ELEMENT_SIZE && rect.height >= MIN_ELEMENT_SIZE;
       });
 
     for (const el of elements) {
+      scannedElements.add(el);
       const info = getImageInfoFromElement(el, el.currentSrc || el.src || "");
       if (info) addCollectedImage(info, el, getMessageIdFromElement(el));
     }
@@ -667,6 +676,7 @@
     if (location.href !== lastScanUrl) {
       lastScanUrl = location.href;
       collectedImages.length = 0;
+      collectedImagesMap.clear();
       updateModalCount();
       console.log("[无水印] 检测到页面切换，已清空图片缓存");
     }
@@ -681,11 +691,13 @@
     scanAndCollectImages();
   }
 
+  let scanDebounceTimer = null;
   const scanObserver = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
         if (node.nodeType === 1 && (node.tagName === "IMG" || node.tagName === "CANVAS")) {
-          setTimeout(scanAndCollectImages, 500);
+          if (scanDebounceTimer) clearTimeout(scanDebounceTimer);
+          scanDebounceTimer = setTimeout(scanAndCollectImages, 500);
           return;
         }
       }
