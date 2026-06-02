@@ -190,11 +190,12 @@
 
   function extractImagesFromMessages(messages) {
     for (const msg of messages) {
+      const msgId = msg.message_id || "";
       for (const block of (msg.content_block || [])) {
         const creations = block.content?.creation_block?.creations;
         if (!Array.isArray(creations)) continue;
         for (const creation of creations) {
-          if (creation.image) addCollectedImageFromApi(creation.image);
+          if (creation.image) addCollectedImageFromApi(creation.image, msgId);
         }
       }
     }
@@ -202,6 +203,7 @@
 
   function extractImagesFromStreamChunk(json) {
     let creations = [];
+    let streamMsgId = "";
 
     // 处理 patch_op 格式（初次生成）
     if (json.patch_op) {
@@ -230,18 +232,17 @@
     if (json.event_data) {
       try {
         const eventData = typeof json.event_data === "string" ? JSON.parse(json.event_data) : json.event_data;
+        streamMsgId = eventData?.message_id || eventData?.message?.id || "";
         const content = eventData?.message?.content;
         if (content) {
           const parsed = typeof content === "string" ? JSON.parse(content) : content;
-          // 二次编辑返回 data[] 数组，包含 image_thumb + image_ori
           if (Array.isArray(parsed.data)) {
             for (const item of parsed.data) {
               if (item.image_ori || item.image_thumb) {
-                addCollectedImageFromApi(item);
+                addCollectedImageFromApi(item, streamMsgId);
               }
             }
           }
-          // 也尝试 creations 格式
           if (Array.isArray(parsed.creations)) {
             creations.push(...parsed.creations);
           }
@@ -250,13 +251,13 @@
     }
 
     for (const creation of creations) {
-      if (creation.image) addCollectedImageFromApi(creation.image);
+      if (creation.image) addCollectedImageFromApi(creation.image, streamMsgId);
     }
   }
 
-  function addCollectedImageFromApi(imageObj) {
+  function addCollectedImageFromApi(imageObj, messageId) {
     const info = normalizeImageInfo(imageObj);
-    if (info) addCollectedImage(info, null);
+    if (info) addCollectedImage(info, null, messageId);
   }
 
   // ── GM 跨域请求，返回 Blob（绕过 CORS）─────────────────────────────────────
@@ -563,17 +564,17 @@
     return info?.key || extractImageKey(info?.previewImage?.url) || extractImageKey(info?.downloadImage?.url) || "";
   }
 
-  function addCollectedImage(info, element) {
+  function addCollectedImage(info, element, messageId) {
     if (!info?.previewImage?.url || !info?.downloadImage?.url) return false;
     const key = getImageKeyForDedup(info);
     if (!key) return false;
     const existing = collectedImages.find(item => getImageKeyForDedup(item.info) === key);
     if (existing) {
-      // 已有项无 DOM 引用而新扫描有，更新引用
       if (element && !existing.element) existing.element = element;
+      if (messageId && !existing.messageId) existing.messageId = messageId;
       return false;
     }
-    collectedImages.push({ info, thumbnailUrl: info.previewImage.url, element: element || null });
+    collectedImages.push({ info, thumbnailUrl: info.previewImage.url, element: element || null, messageId: messageId || null });
     updateModalCount();
     return true;
   }
@@ -587,8 +588,21 @@
 
     for (const el of elements) {
       const info = getImageInfoFromElement(el, el.currentSrc || el.src || "");
-      if (info) addCollectedImage(info, el);
+      if (info) addCollectedImage(info, el, getMessageIdFromElement(el));
     }
+  }
+
+  // 从 DOM 元素向上遍历祖先，提取 messageId
+  function getMessageIdFromElement(el) {
+    let node = el;
+    for (let i = 0; i < 15 && node; i++) {
+      const row = node.dataset?.observeRow;
+      if (row && row.startsWith("block_")) return row.replace("block_", "");
+      const msgId = node.dataset?.messageId;
+      if (msgId) return msgId;
+      node = node.parentElement;
+    }
+    return null;
   }
 
   // 通过图片信息在当前 DOM 中查找匹配的元素
@@ -602,6 +616,33 @@
       if (info && getImageKeyForDedup(info) === targetKey) return el;
     }
     return null;
+  }
+
+  // 通过虚拟列表 positionMap 精确滚动到指定消息
+  function scrollToMessage(messageId) {
+    if (!messageId) return false;
+    const scroller = document.querySelector(".scroller");
+    if (!scroller) return false;
+
+    // 通过 React Fiber 获取虚拟列表实例
+    const fiberKey = Object.keys(scroller).find(k => k.startsWith("__reactFiber"));
+    if (!fiberKey) return false;
+    let fiber = scroller[fiberKey];
+    let vlist = null;
+    for (let depth = 0; fiber && depth < 20; depth++) {
+      const state = fiber.stateNode?.state;
+      if (state?.positionMap?._sections) { vlist = fiber.stateNode; break; }
+      fiber = fiber.return;
+    }
+    if (!vlist) return false;
+
+    const sections = vlist.state.positionMap._sections;
+    const target = sections.find(s => s.keys?.some(k => k.includes(messageId)));
+    if (!target) return false;
+
+    const headerEnd = vlist.state.positionMap._header?.end || 0;
+    scroller.scrollTop = target.start - headerEnd;
+    return true;
   }
 
   // 定期扫描 + MutationObserver 扫描 + URL 变化检测
@@ -1227,28 +1268,31 @@
         const item = collectedImages[idx];
         if (!item) return;
 
-        // 在当前 DOM 中查找匹配的元素（虚拟滚动可能导致存储的引用失效）
-        const target = findElementByInfo(item.info) || (item.element?.isConnected ? item.element : null);
-
-        if (!target) {
-          showToast("图片当前未在页面中渲染，请先滚动到该图片附近", 4000);
-          return;
-        }
-
-        // 更新引用
-        item.element = target;
-
         closeModal();
+
         setTimeout(() => {
-          target.scrollIntoView({ behavior: "smooth", block: "center" });
-          const orig = target.style.outline;
-          target.style.outline = "3px solid #ff6060";
-          target.style.outlineOffset = "2px";
+          // 优先通过 positionMap 精确滚动到消息位置（虚拟滚动下仍有效）
+          const scrolled = item.messageId && scrollToMessage(item.messageId);
+
+          // 等待虚拟列表渲染完成后高亮
+          const waitMs = scrolled ? 800 : 300;
           setTimeout(() => {
-            target.style.outline = orig;
-            target.style.outlineOffset = "";
-          }, 2000);
-        }, 300);
+            const target = findElementByInfo(item.info) || (item.element?.isConnected ? item.element : null);
+            if (target) {
+              item.element = target;
+              if (!scrolled) target.scrollIntoView({ behavior: "smooth", block: "center" });
+              const orig = target.style.outline;
+              target.style.outline = "3px solid #ff6060";
+              target.style.outlineOffset = "2px";
+              setTimeout(() => {
+                target.style.outline = orig;
+                target.style.outlineOffset = "";
+              }, 2000);
+            } else if (!scrolled) {
+              showToast("图片当前未在页面中渲染", 3000);
+            }
+          }, waitMs);
+        }, 200);
       });
     });
 
