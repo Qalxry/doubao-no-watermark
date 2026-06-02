@@ -914,30 +914,17 @@
       ? "当前模式：API 直链；如果该图片没有直链，会自动回退到重叠去水印"
       : "当前模式：重叠去水印";
 
-    // 不强行改菜单定位，只修正新注入行的 flex 对齐；没有模板类时再补最小 fallback。
-    btn.style.cssText += `
-      color: #ff6060;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      line-height: 1.2;
-      box-sizing: border-box;
-      white-space: nowrap;
-    `;
-    if (!existingItemClass) {
-      btn.style.cssText += "min-height:40px;padding:0 20px;border-radius:8px;";
-    }
+    btn.style.cssText += "color:#ff6060;cursor:pointer;";
 
     btn.innerHTML = `
-      <span role="img" aria-hidden="true" style="width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;line-height:1;">
-        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 3v12"/>
-          <path d="m7 10 5 5 5-5"/>
-          <path d="M5 21h14"/>
+      <span role="img" style="margin-right:8px;display:inline-flex;vertical-align:middle;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M19.207 12.707a1 1 0 0 0-1.414-1.414L13 16.086V2a1 1 0 1 0-2 0v14.086
+                   l-4.793-4.793a1 1 0 0 0-1.414 1.414l6.5 6.5c.195.195.45.293.706.293
+                   H5a1 1 0 1 0 0 2h14a1 1 0 1 0 0-2h-6.999a1 1 0 0 0 .706-.293z"/>
         </svg>
       </span>
-      <span style="display:inline-flex;align-items:center;line-height:20px;">下载无水印原图</span>
+      下载无水印原图
     `;
 
     btn.addEventListener("click", async (e) => {
