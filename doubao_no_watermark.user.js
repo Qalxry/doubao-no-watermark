@@ -201,10 +201,9 @@
   }
 
   function extractImagesFromStreamChunk(json) {
-    let creations = [];
-
-    // 处理 patch_op 格式（初次生成）
+    // 路径 1: patch_op 格式（初次生成）
     if (json.patch_op) {
+      let creations = [];
       for (const op of json.patch_op) {
         const blocks = op.patch_value?.content_block;
         if (Array.isArray(blocks)) {
@@ -224,33 +223,35 @@
           } catch (_) {}
         }
       }
+      for (const creation of creations) {
+        if (creation.image) addCollectedImageFromApi(creation.image);
+      }
     }
 
-    // 处理 event_data 格式（二次编辑）
+    // 路径 2: event_data 格式（初次生成 + 二次编辑）
     if (json.event_data) {
       try {
         const eventData = typeof json.event_data === "string" ? JSON.parse(json.event_data) : json.event_data;
-        const content = eventData?.message?.content;
-        if (content) {
-          const parsed = typeof content === "string" ? JSON.parse(content) : content;
-          // 二次编辑返回 data[] 数组，包含 image_thumb + image_ori
-          if (Array.isArray(parsed.data)) {
-            for (const item of parsed.data) {
-              if (item.image_ori || item.image_thumb) {
-                addCollectedImageFromApi(item);
-              }
-            }
+        const msg = eventData?.message;
+        if (!msg?.content) return;
+        const content = typeof msg.content === "string" ? JSON.parse(msg.content) : msg.content;
+
+        // 初次生成: content.creations[]
+        if (Array.isArray(content.creations)) {
+          for (const creation of content.creations) {
+            if (creation.image) addCollectedImageFromApi(creation.image);
           }
-          // 也尝试 creations 格式
-          if (Array.isArray(parsed.creations)) {
-            creations.push(...parsed.creations);
+        }
+
+        // 二次编辑: content.data[] 包含 image_thumb + image_ori
+        if (Array.isArray(content.data)) {
+          for (const item of content.data) {
+            if (item.image_ori || item.image_thumb) {
+              addCollectedImageFromApi(item);
+            }
           }
         }
       } catch (_) {}
-    }
-
-    for (const creation of creations) {
-      if (creation.image) addCollectedImageFromApi(creation.image);
     }
   }
 
