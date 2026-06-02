@@ -202,6 +202,8 @@
 
   function extractImagesFromStreamChunk(json) {
     let creations = [];
+
+    // 处理 patch_op 格式（初次生成）
     if (json.patch_op) {
       for (const op of json.patch_op) {
         const blocks = op.patch_value?.content_block;
@@ -211,7 +213,6 @@
             if (Array.isArray(c)) creations.push(...c);
           }
         }
-        // 也尝试 ext.creation_full_content
         const ext = op.patch_value?.ext?.creation_full_content;
         if (ext) {
           try {
@@ -224,6 +225,30 @@
         }
       }
     }
+
+    // 处理 event_data 格式（二次编辑）
+    if (json.event_data) {
+      try {
+        const eventData = typeof json.event_data === "string" ? JSON.parse(json.event_data) : json.event_data;
+        const content = eventData?.message?.content;
+        if (content) {
+          const parsed = typeof content === "string" ? JSON.parse(content) : content;
+          // 二次编辑返回 data[] 数组，包含 image_thumb + image_ori
+          if (Array.isArray(parsed.data)) {
+            for (const item of parsed.data) {
+              if (item.image_ori || item.image_thumb) {
+                addCollectedImageFromApi(item);
+              }
+            }
+          }
+          // 也尝试 creations 格式
+          if (Array.isArray(parsed.creations)) {
+            creations.push(...parsed.creations);
+          }
+        }
+      } catch (_) {}
+    }
+
     for (const creation of creations) {
       if (creation.image) addCollectedImageFromApi(creation.image);
     }
@@ -391,21 +416,23 @@
       raw.image_thumb,
     );
 
-    if (!previewImage?.url || !downloadImage?.url) return null;
+    // 二次编辑 API 只返回 image_thumb + image_ori，用 thumbImage 回退 previewImage
+    const resolvedPreview = previewImage || thumbImage;
+    if (!resolvedPreview?.url || !downloadImage?.url) return null;
 
-    const key = source.key || raw.key || extractImageKey(previewImage.url) || extractImageKey(downloadImage.url);
-    const width = firstNumber(source.width, raw.width, previewImage.width, downloadImage.width, thumbImage?.width);
-    const height = firstNumber(source.height, raw.height, previewImage.height, downloadImage.height, thumbImage?.height);
+    const key = source.key || raw.key || extractImageKey(resolvedPreview.url) || extractImageKey(downloadImage.url);
+    const width = firstNumber(source.width, raw.width, resolvedPreview.width, downloadImage.width, thumbImage?.width);
+    const height = firstNumber(source.height, raw.height, resolvedPreview.height, downloadImage.height, thumbImage?.height);
 
     return {
-      format: source.format || raw.format || downloadImage.format || previewImage.format || "",
-      previewImage,
+      format: source.format || raw.format || downloadImage.format || resolvedPreview.format || "",
+      previewImage: resolvedPreview,
       downloadImage,
       thumbImage,
       width,
       height,
       otherFormat: source.otherFormat || raw.otherFormat || {},
-      originalImage: toImageObject(source.originalImage) || toImageObject(source.image_raw) || previewImage,
+      originalImage: toImageObject(source.originalImage) || toImageObject(source.image_raw) || resolvedPreview,
       key,
       downloadName: raw.downloadName || source.downloadName || raw.title || "",
     };
