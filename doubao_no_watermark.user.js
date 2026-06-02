@@ -128,6 +128,113 @@
     return (crc ^ 0xffffffff) >>> 0;
   }
 
+  // ── API 拦截：从聊天接口响应中提取图片信息（解决懒加载问题）──────────────────
+  const originalXHROpen = XMLHttpRequest.prototype.open;
+  const originalXHRSend = XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open = function (method, url, ...args) {
+    this._nomark_url = url;
+    return originalXHROpen.apply(this, [method, url, ...args]);
+  };
+
+  XMLHttpRequest.prototype.send = function (...args) {
+    this.addEventListener("load", function () {
+      try {
+        const url = this._nomark_url || "";
+        if (url.includes("/im/chain/single")) {
+          const data = JSON.parse(this.responseText);
+          const messages = data?.downlink_body?.pull_singe_chain_downlink_body?.messages;
+          if (Array.isArray(messages)) {
+            extractImagesFromMessages(messages);
+          }
+        }
+      } catch (_) {}
+    });
+    return originalXHRSend.apply(this, args);
+  };
+
+  const originalFetch = window.fetch;
+  window.fetch = async function (...args) {
+    const url = typeof args[0] === "string" ? args[0] : "";
+    const response = await originalFetch.apply(this, args);
+
+    // 异步读取 clone，不阻塞页面接收原始 response
+    if (url.includes("/chat/completion")) {
+      readStreamForImages(response.clone());
+    }
+
+    return response;
+  };
+
+  async function readStreamForImages(response) {
+    try {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              extractImagesFromStreamChunk(JSON.parse(line.substring(6)));
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  function extractImagesFromMessages(messages) {
+    for (const msg of messages) {
+      for (const block of (msg.content_block || [])) {
+        const creations = block.content?.creation_block?.creations;
+        if (!Array.isArray(creations)) continue;
+        for (const creation of creations) {
+          if (creation.image) addCollectedImageFromApi(creation.image);
+        }
+      }
+    }
+  }
+
+  function extractImagesFromStreamChunk(json) {
+    let creations = [];
+    if (json.patch_op) {
+      for (const op of json.patch_op) {
+        const blocks = op.patch_value?.content_block;
+        if (Array.isArray(blocks)) {
+          for (const block of blocks) {
+            const c = block.content?.creation_block?.creations;
+            if (Array.isArray(c)) creations.push(...c);
+          }
+        }
+        // 也尝试 ext.creation_full_content
+        const ext = op.patch_value?.ext?.creation_full_content;
+        if (ext) {
+          try {
+            const parsed = JSON.parse(ext);
+            for (const item of parsed) {
+              const c = item?.BlockInfo?.BlockContent?.content?.creation_block?.creations;
+              if (Array.isArray(c)) creations.push(...c);
+            }
+          } catch (_) {}
+        }
+      }
+    }
+    for (const creation of creations) {
+      if (creation.image) addCollectedImageFromApi(creation.image);
+    }
+  }
+
+  function addCollectedImageFromApi(imageObj) {
+    // 尝试从 API 返回的 image 对象中构造 imageInfo 格式
+    const info = normalizeImageInfo(imageObj);
+    if (info) addCollectedImage(info);
+  }
+
   // ── GM 跨域请求，返回 Blob（绕过 CORS）─────────────────────────────────────
   function gmFetchBlob(url) {
     return new Promise((resolve, reject) => {
