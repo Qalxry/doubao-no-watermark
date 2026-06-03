@@ -481,7 +481,7 @@
     seen.add(value);
 
     const info = normalizeImageInfo(value);
-    if (info) candidates.push({ info, path, objectDepth: depth });
+    if (info) candidates.push({ info, path, objectDepth: depth, raw: value });
 
     if (Array.isArray(value)) {
       value.slice(0, 24).forEach((item, index) => {
@@ -632,8 +632,27 @@
     for (const el of elements) {
       scannedElements.add(el);
       const info = getImageInfoFromElement(el, el.currentSrc || el.src || "");
-      if (info) addCollectedImage(info, el, getMessageIdFromElement(el));
+      if (info) {
+        const directUrl = getDirectUrlFromElement(el);
+        addCollectedImage(info, el, getMessageIdFromElement(el), directUrl);
+      }
     }
+  }
+
+  // 从元素的 Fiber 数据中提取 image_ori_raw 等无水印直链
+  function getDirectUrlFromElement(el) {
+    const fiber = getReactFiber(el);
+    if (!fiber) return null;
+    let node = fiber;
+    for (let depth = 0; node && depth < MAX_FIBER_DEPTH; depth++) {
+      const props = node.memoizedProps || node.pendingProps;
+      if (props && isObject(props)) {
+        const url = extractDirectUrl(props);
+        if (url) return url;
+      }
+      node = node.return;
+    }
+    return null;
   }
 
   // 从 DOM 元素向上遍历祖先，提取 messageId
