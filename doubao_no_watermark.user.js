@@ -165,7 +165,9 @@
       try {
         const url = this._nomark_url || "";
         if (isMessageApiUrl(url)) extractImagesFromApiResponse(JSON.parse(this.responseText));
-      } catch (_) {}
+      } catch (err) {
+        warnThrottled("xhr-parse", `XHR 响应解析失败: ${err.message}`);
+      }
     });
     return originalXHRSend.apply(this, args);
   };
@@ -203,7 +205,9 @@
   async function readJsonResponseForImages(response) {
     try {
       extractImagesFromApiResponse(await response.json());
-    } catch (_) {}
+    } catch (err) {
+      warnThrottled("json-resp", `API JSON 响应解析失败: ${err.message}`);
+    }
   }
 
   async function readStreamForImages(response) {
@@ -225,7 +229,9 @@
           }
         }
       }
-    } catch (_) {}
+    } catch (err) {
+      warnThrottled("stream-read", `流式响应读取失败: ${err.message}`);
+    }
   }
 
   function extractImagesFromMessages(messages) {
@@ -478,11 +484,23 @@
       collectedImages.length = 0;
       collectedImagesMap.clear();
       shouldResetScannedElementsWhenRouterReady = true;
-      lastRouterDataSize = 0;
+      lastRouterSignature = "";
       updateModalCount();
       scheduleModalRenderIfOpen(true);
       scheduleCurrentRouteDataFetch();
       console.log("[无水印] 检测到会话切换，已清空图片缓存");
+    }
+  }
+
+  function getRouterDataSignature(routerData) {
+    if (!routerData) return "";
+    try {
+      const messages = findRouterMessageList(routerData.loaderData || routerData);
+      if (!Array.isArray(messages) || messages.length === 0) return "empty";
+      const last = messages[messages.length - 1];
+      return `${messages.length}:${last?.message_id || ""}:${last?.create_time || ""}`;
+    } catch (_) {
+      return "error";
     }
   }
 
@@ -500,7 +518,8 @@
       }
       extractImagesFromMessages(messages);
       return true;
-    } catch (_) {
+    } catch (err) {
+      warnThrottled("router-extract", `RouterData 图片提取失败: ${err.message}`);
       return false;
     }
   }
@@ -579,6 +598,14 @@
   const CAPTURE_TTL_MS = 5 * 60 * 1000;   // 右键捕获的图片信息有效期
   const MERGE_TIMEOUT_MS = 30000;          // 单张图片合并超时
   const MIN_ELEMENT_SIZE = 40;             // 最小可扫描元素尺寸(px)
+
+  const _warnTimers = {};
+  function warnThrottled(key, msg, ms = 30000) {
+    if (_warnTimers[key]) return;
+    _warnTimers[key] = true;
+    console.warn("[无水印]", msg);
+    setTimeout(() => { _warnTimers[key] = false; }, ms);
+  }
 
   function isObject(value) {
     return value !== null && typeof value === "object";
@@ -1113,12 +1140,55 @@
     ].filter(Boolean);
   }
 
+  function isVisibleChatMediaElement(el) {
+    if (!el?.isConnected) return false;
+    if (el.closest("#doubao-nomark-modal")) return false;
+    if (!el.closest("[data-observe-row]")) return false;
+    const rect = el.getBoundingClientRect();
+    const src = el.currentSrc || el.src || "";
+    return rect.width >= MIN_ELEMENT_SIZE
+      && rect.height >= MIN_ELEMENT_SIZE
+      && (el.tagName === "CANVAS" || (src && !src.startsWith("data:image/svg")));
+  }
+
+  function sameVisibleChatImage(a, b) {
+    if (sameImageKey(a, b)) return true;
+    const nameA = extractImageKey(a).split("/").pop();
+    const nameB = extractImageKey(b).split("/").pop();
+    return Boolean(
+      nameA
+      && nameA === nameB
+      && /^[a-f0-9]{32}\.(?:jpe?g|png|webp)$/i.test(nameA)
+    );
+  }
+
+  function findVisibleChatElementByInfo(targetInfo) {
+    if (!targetInfo) return null;
+    const targetKey = getImageKeyForDedup(targetInfo);
+    if (!targetKey) return null;
+    const targetHints = getImageMatchHints(targetInfo);
+    const targetValues = [...targetHints, targetKey].filter(Boolean);
+    const elements = document.querySelectorAll("[data-observe-row] canvas,[data-observe-row] img");
+    for (const el of elements) {
+      if (!isVisibleChatMediaElement(el)) continue;
+      const elementUrl = el.currentSrc || el.src || "";
+      const matchedUrl = elementUrl && targetValues.some(url => sameVisibleChatImage(url, elementUrl));
+      if (elementUrl && !matchedUrl) continue;
+      const targetUrl = targetValues.find(url => sameVisibleChatImage(url, elementUrl)) || elementUrl || targetHints[0];
+      const info = getImageInfoFromElement(el, targetUrl);
+      if (info && sameVisibleChatImage(getImageKeyForDedup(info), targetKey)) return el;
+      if (matchedUrl) return el;
+    }
+    return null;
+  }
+
   // 通过图片信息在当前 DOM 中查找匹配的元素
   function findElementByInfo(targetInfo, messageId) {
     if (!targetInfo) return null;
     const targetKey = getImageKeyForDedup(targetInfo);
     if (!targetKey) return null;
     const row = messageId ? document.querySelector(`[data-observe-row="block_${messageId}"]`) : null;
+    if (messageId && !row) return null;
     const searchRoot = row || document;
     const targetHints = getImageMatchHints(targetInfo);
     const elements = searchRoot.querySelectorAll("canvas,img");
@@ -1190,7 +1260,7 @@
   // 定期扫描 + MutationObserver 扫描 + URL 变化检测
   let scanTimer = null;
   let lastScanUrl = location.href;
-  let lastRouterDataSize = 0;
+  let lastRouterSignature = "";
 
   function checkUrlChange() {
     if (location.href !== lastScanUrl) {
@@ -1198,7 +1268,7 @@
       collectedImages.length = 0;
       collectedImagesMap.clear();
       shouldResetScannedElementsWhenRouterReady = true;
-      lastRouterDataSize = 0;
+      lastRouterSignature = "";
       updateModalCount();
       scheduleModalRenderIfOpen(true);
       scheduleCurrentRouteDataFetch();
@@ -1229,13 +1299,15 @@
       scanAndCollectImages();
       // 监听 _ROUTER_DATA 变化（画布侧栏打开时会填充数据）
       try {
-        const routerStr = JSON.stringify(pageWindow._ROUTER_DATA || {});
-        if (routerStr.length !== lastRouterDataSize) {
+        const sig = getRouterDataSignature(pageWindow._ROUTER_DATA);
+        if (sig !== lastRouterSignature) {
           if (extractImagesFromRouterData()) {
-            lastRouterDataSize = routerStr.length;
+            lastRouterSignature = sig;
           }
         }
-      } catch (_) {}
+      } catch (err) {
+        warnThrottled("router-poll", `RouterData 轮询检测异常: ${err.message}`);
+      }
     }, SCAN_INTERVAL_MS);
     scanAndCollectImages();
   }
@@ -1577,12 +1649,16 @@
   }
 
   function getUiStats() {
-    const currentImages = getCurrentCollectedImages();
-    const total = currentImages.length;
-    const ai = currentImages.filter(item => item.source === "ai").length;
-    const user = currentImages.filter(item => item.source === "user").length;
-    const direct = currentImages.filter(item => item.directUrl).length;
-    const locatable = currentImages.filter(item => item.element || item.messageId).length;
+    const conversationId = getConversationId();
+    let total = 0, ai = 0, user = 0, direct = 0, locatable = 0;
+    for (const item of collectedImages) {
+      if (conversationId && item.conversationId !== conversationId) continue;
+      total++;
+      if (item.source === "ai") ai++;
+      else if (item.source === "user") user++;
+      if (item.directUrl) direct++;
+      if (item.element || item.messageId) locatable++;
+    }
     return { total, ai, user, direct, locatable };
   }
 
@@ -2631,14 +2707,15 @@
 
         closeModal();
 
-      setTimeout(() => {
-        const scrolled = item.messageId && scrollToMessage(item.messageId);
-        const waitMs = scrolled ? 800 : 300;
         setTimeout(() => {
-          const target = findElementByMessageIndex(item.messageId, item.messageImageIndex)
-            || findElementByInfo(item.info, item.messageId)
-            || (isElementUsableForItem(item.element, item) ? item.element : null)
-            || (item.messageId ? null : findElementByInfo(item.info));
+          const scrolled = item.messageId && scrollToMessage(item.messageId);
+          const waitMs = scrolled ? 800 : 300;
+          setTimeout(() => {
+            const target = findElementByMessageIndex(item.messageId, item.messageImageIndex)
+              || findElementByInfo(item.info, item.messageId)
+              || findVisibleChatElementByInfo(item.info)
+              || (isElementUsableForItem(item.element, item) ? item.element : null)
+              || (item.messageId ? null : findElementByInfo(item.info));
             if (target) {
               item.element = target;
               target.scrollIntoView({ behavior: "smooth", block: "center" });
