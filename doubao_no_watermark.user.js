@@ -1579,9 +1579,11 @@
   function getUiStats() {
     const currentImages = getCurrentCollectedImages();
     const total = currentImages.length;
+    const ai = currentImages.filter(item => item.source === "ai").length;
+    const user = currentImages.filter(item => item.source === "user").length;
     const direct = currentImages.filter(item => item.directUrl).length;
     const locatable = currentImages.filter(item => item.element || item.messageId).length;
-    return { total, direct, locatable };
+    return { total, ai, user, direct, locatable };
   }
 
   function updateModalCount() {
@@ -1599,9 +1601,13 @@
 
     if (modalElement) {
       const totalEl = modalElement.querySelector(".nomark-stat-total");
+      const aiEl = modalElement.querySelector(".nomark-stat-ai");
+      const userEl = modalElement.querySelector(".nomark-stat-user");
       const directEl = modalElement.querySelector(".nomark-stat-direct");
       const locateEl = modalElement.querySelector(".nomark-stat-locate");
       if (totalEl) totalEl.textContent = String(stats.total);
+      if (aiEl) aiEl.textContent = String(stats.ai);
+      if (userEl) userEl.textContent = String(stats.user);
       if (directEl) directEl.textContent = String(stats.direct);
       if (locateEl) locateEl.textContent = String(stats.locatable);
       updateSelectedCount();
@@ -2264,6 +2270,8 @@
             </div>
             <div class="nomark-stat-row">
               <span class="nomark-stat-card">已收集 <strong class="nomark-stat-total">0</strong></span>
+              <span class="nomark-stat-card">AI <strong class="nomark-stat-ai">0</strong></span>
+              <span class="nomark-stat-card">用户 <strong class="nomark-stat-user">0</strong></span>
               <span class="nomark-stat-card">直链 <strong class="nomark-stat-direct">0</strong></span>
               <span class="nomark-stat-card">可定位 <strong class="nomark-stat-locate">0</strong></span>
               <span class="nomark-stat-card">已选择 <strong class="nomark-selected-count">0</strong></span>
