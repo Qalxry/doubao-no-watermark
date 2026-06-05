@@ -2401,6 +2401,79 @@
     modalElement = modal;
 
     const container = modal.querySelector("#nomark-media-container");
+
+    container.addEventListener("change", (e) => {
+      if (e.target.classList.contains("nomark-select")) setCardSelected(e.target);
+    });
+    container.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".nomark-download-btn");
+      if (btn) {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.recordIndex, 10);
+        const item = collectedImages[idx];
+        if (!item) return;
+        btn.textContent = "下载中";
+        btn.disabled = true;
+        try {
+          await downloadSingleImage(item.info, item.directUrl);
+          btn.classList.add("success");
+          btn.textContent = "✓ 已下载";
+        } catch (err) {
+          btn.textContent = "失败";
+          showToast(`下载失败：${err.message}`, 3000);
+        } finally {
+          setTimeout(() => {
+            btn.disabled = false;
+            btn.classList.remove("success");
+            btn.textContent = "下载";
+          }, 2000);
+        }
+        return;
+      }
+      const locateBtn = e.target.closest(".btn-locate");
+      if (locateBtn) {
+        e.stopPropagation();
+        const idx = parseInt(locateBtn.dataset.recordIndex, 10);
+        const item = collectedImages[idx];
+        if (!item) return;
+        closeModal();
+        setTimeout(() => {
+          const scrolled = item.messageId && scrollToMessage(item.messageId);
+          const waitMs = scrolled ? 800 : 300;
+          setTimeout(() => {
+            const target = findElementByMessageIndex(item.messageId, item.messageImageIndex)
+              || findElementByInfo(item.info, item.messageId)
+              || findVisibleChatElementByInfo(item.info)
+              || (isElementUsableForItem(item.element, item) ? item.element : null)
+              || (item.messageId ? null : findElementByInfo(item.info));
+            if (target) {
+              item.element = target;
+              target.scrollIntoView({ behavior: "smooth", block: "center" });
+              const orig = target.style.outline;
+              const origOffset = target.style.outlineOffset;
+              target.style.outline = "3px solid #ff6060";
+              target.style.outlineOffset = "3px";
+              setTimeout(() => {
+                target.style.outline = orig;
+                target.style.outlineOffset = origOffset;
+              }, 2000);
+            } else {
+              showToast("图片当前未在页面中渲染", 3000);
+            }
+          }, waitMs);
+        }, 200);
+        return;
+      }
+      const preview = e.target.closest(".nomark-preview");
+      if (preview) {
+        const cb = preview.closest(".nomark-card")?.querySelector(".nomark-select");
+        if (cb) {
+          cb.checked = !cb.checked;
+          setCardSelected(cb);
+        }
+      }
+    });
+
     const selectAllBtn = modal.querySelector(".btn-select-all");
     const clearBtn = modal.querySelector(".btn-clear-selection");
     const batchBtn = modal.querySelector(".btn-batch-download");
@@ -2679,83 +2752,6 @@
         </div>
       `;
     }).join("");
-
-    container.querySelectorAll(".nomark-select").forEach(cb => {
-      cb.addEventListener("change", () => setCardSelected(cb));
-    });
-
-    container.querySelectorAll(".nomark-download-btn").forEach(btn => {
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        const idx = parseInt(btn.dataset.recordIndex, 10);
-        const item = collectedImages[idx];
-        if (!item) return;
-
-        btn.textContent = "下载中";
-        btn.disabled = true;
-        try {
-          await downloadSingleImage(item.info, item.directUrl);
-          btn.classList.add("success");
-          btn.textContent = "✓ 已下载";
-        } catch (err) {
-          btn.textContent = "失败";
-          showToast(`下载失败：${err.message}`, 3000);
-        } finally {
-          setTimeout(() => {
-            btn.disabled = false;
-            btn.classList.remove("success");
-            btn.textContent = "下载";
-          }, 2000);
-        }
-      });
-    });
-
-    container.querySelectorAll(".btn-locate").forEach(btn => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const idx = parseInt(btn.dataset.recordIndex, 10);
-        const item = collectedImages[idx];
-        if (!item) return;
-
-        closeModal();
-
-        setTimeout(() => {
-          const scrolled = item.messageId && scrollToMessage(item.messageId);
-          const waitMs = scrolled ? 800 : 300;
-          setTimeout(() => {
-            const target = findElementByMessageIndex(item.messageId, item.messageImageIndex)
-              || findElementByInfo(item.info, item.messageId)
-              || findVisibleChatElementByInfo(item.info)
-              || (isElementUsableForItem(item.element, item) ? item.element : null)
-              || (item.messageId ? null : findElementByInfo(item.info));
-            if (target) {
-              item.element = target;
-              target.scrollIntoView({ behavior: "smooth", block: "center" });
-              const orig = target.style.outline;
-              const origOffset = target.style.outlineOffset;
-              target.style.outline = "3px solid #ff6060";
-              target.style.outlineOffset = "3px";
-              setTimeout(() => {
-                target.style.outline = orig;
-                target.style.outlineOffset = origOffset;
-              }, 2000);
-            } else {
-              showToast("图片当前未在页面中渲染", 3000);
-            }
-          }, waitMs);
-        }, 200);
-      });
-    });
-
-    container.querySelectorAll(".nomark-preview").forEach(preview => {
-      preview.addEventListener("click", () => {
-        const cb = preview.closest(".nomark-card")?.querySelector(".nomark-select");
-        if (cb) {
-          cb.checked = !cb.checked;
-          setCardSelected(cb);
-        }
-      });
-    });
 
     updateSelectedCount();
   }
