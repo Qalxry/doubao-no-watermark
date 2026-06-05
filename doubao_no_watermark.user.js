@@ -850,14 +850,19 @@
   }
 
   function getBestVisibleImageInfo() {
+    const rectCache = new Map();
+    const getRect = (el) => {
+      if (!rectCache.has(el)) rectCache.set(el, el.getBoundingClientRect());
+      return rectCache.get(el);
+    };
     const elements = [...document.querySelectorAll("canvas,img")]
       .filter(el => {
-        const rect = el.getBoundingClientRect();
+        const rect = getRect(el);
         return rect.width >= MIN_ELEMENT_SIZE && rect.height >= MIN_ELEMENT_SIZE && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
       })
       .sort((a, b) => {
-        const ra = a.getBoundingClientRect();
-        const rb = b.getBoundingClientRect();
+        const ra = getRect(a);
+        const rb = getRect(b);
         const canvasBias = (b.tagName === "CANVAS" ? 1e8 : 0) - (a.tagName === "CANVAS" ? 1e8 : 0);
         return canvasBias || (rb.width * rb.height - ra.width * ra.height);
       });
@@ -1343,7 +1348,11 @@
     font-family: sans-serif; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
     transition: opacity 0.3s ease; display: none; text-align: center;
   `;
-  document.body.appendChild(toastDiv);
+  if (document.body) {
+    document.body.appendChild(toastDiv);
+  } else {
+    document.addEventListener("DOMContentLoaded", () => document.body.appendChild(toastDiv));
+  }
 
   function showToast(message, duration = 3000) {
     toastDiv.textContent = message;
@@ -2574,7 +2583,10 @@
       throw new Error("图片地址无效");
     }
     const [blobA, blobB] = await Promise.all([gmFetchBlob(urlA), gmFetchBlob(urlB)]);
-    return mergeImages(blobA, blobB);
+    return Promise.race([
+      mergeImages(blobA, blobB),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("图片合并超时(30s)")), MERGE_TIMEOUT_MS)),
+    ]);
   }
 
   async function downloadSingleImage(imageInfo, directUrl) {
