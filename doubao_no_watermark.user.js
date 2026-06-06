@@ -483,6 +483,8 @@
       lastConversationId = currentId;
       collectedImages.length = 0;
       collectedImagesMap.clear();
+      selectedIndices.clear();
+      batchProgress = { status: "", selectedIndices: null, total: 0, currentNum: 0, currentIndex: -1, successCount: 0, doneIndices: null, isDirect: false };
       shouldResetScannedElementsWhenRouterReady = true;
       lastRouterSignature = "";
       updateModalCount();
@@ -878,6 +880,8 @@
   const collectedImages = [];
   const collectedImagesMap = new Map(); // key → index, O(1) 去重
   const MAX_COLLECTED_IMAGES = 200;     // 容量上限，防内存泄漏
+  const selectedIndices = new Set();    // 持久化选择状态
+  let batchProgress = { current: 0, total: 0, status: "" }; // 批量下载进度
   var modalRenderTimer = null;
   var collectionSeq = 0;
 
@@ -1272,6 +1276,8 @@
       lastScanUrl = location.href;
       collectedImages.length = 0;
       collectedImagesMap.clear();
+      selectedIndices.clear();
+      batchProgress = { status: "", selectedIndices: null, total: 0, currentNum: 0, currentIndex: -1, successCount: 0, doneIndices: null, isDirect: false };
       shouldResetScannedElementsWhenRouterReady = true;
       lastRouterSignature = "";
       updateModalCount();
@@ -1711,6 +1717,9 @@
   }
 
   function setCardSelected(checkbox) {
+    const idx = parseInt(checkbox.dataset.recordIndex, 10);
+    if (checkbox.checked) selectedIndices.add(idx);
+    else selectedIndices.delete(idx);
     const card = checkbox?.closest?.(".nomark-card");
     if (card) card.classList.toggle("selected", checkbox.checked);
     updateSelectedCount();
@@ -2536,17 +2545,18 @@
     });
 
     selectAllBtn.addEventListener("click", () => {
-      container.querySelectorAll(".nomark-select").forEach(cb => {
-        cb.checked = true;
-        setCardSelected(cb);
+      const currentConversationId = getConversationId();
+      collectedImages.forEach((item, idx) => {
+        if (!currentConversationId || item.conversationId === currentConversationId) {
+          selectedIndices.add(idx);
+        }
       });
+      renderModalImages();
     });
 
     clearBtn.addEventListener("click", () => {
-      container.querySelectorAll(".nomark-select").forEach(cb => {
-        cb.checked = false;
-        setCardSelected(cb);
-      });
+      selectedIndices.clear();
+      renderModalImages();
     });
 
     let batchDownloading = false;
@@ -2555,7 +2565,10 @@
     batchBtn.addEventListener("click", async () => {
       if (batchDownloading) { batchCancel = true; return; }
 
-      const selected = [...container.querySelectorAll(".nomark-select:checked")];
+      const selected = [...selectedIndices].filter(idx => {
+        const item = collectedImages[idx];
+        return item && (!getConversationId() || item.conversationId === getConversationId());
+      });
       if (selected.length === 0) { showToast("请先选择要下载的图片", 3000); return; }
 
       console.log(`[无水印] 批量下载开始，共 ${selected.length} 张图片`);
@@ -2569,21 +2582,21 @@
       const zipFiles = [];
       let successCount = 0;
       const total = selected.length;
+      const doneIndices = new Set();
+      batchProgress = { status: "downloading", selectedIndices: new Set(selected), total, currentNum: 0, currentIndex: -1, successCount: 0, doneIndices, isDirect: false };
 
       for (let i = 0; i < selected.length; i++) {
         if (batchCancel) break;
-        const cb = selected[i];
-        const idx = parseInt(cb.dataset.recordIndex, 10);
+        const idx = selected[i];
         const item = collectedImages[idx];
         if (!item) continue;
 
-        const card = cb.closest(".nomark-card");
-        const dlBtn = card?.querySelector(".nomark-download-btn");
-        if (dlBtn) dlBtn.textContent = `处理中 ${i + 1}/${total}`;
+        batchProgress.currentIndex = idx;
+        batchProgress.currentNum = i + 1;
 
         try {
           const isDirect = downloadMode === "direct" && item.directUrl;
-          if (dlBtn) dlBtn.textContent = isDirect ? `下载中 ${i + 1}/${total}` : `合并中 ${i + 1}/${total}`;
+          batchProgress.isDirect = isDirect;
           console.log(`[无水印] 正在${isDirect ? "下载" : "合并"}第 ${i + 1}/${total} 张图片…`);
           if (i === 0) {
             if (isDirect) {
@@ -2611,9 +2624,10 @@
           const arrayBuffer = await blob.arrayBuffer();
           zipFiles.push({ name: `豆包无水印图片/${filename}`, data: new Uint8Array(arrayBuffer) });
           successCount++;
-          if (dlBtn) { dlBtn.classList.add("success"); dlBtn.textContent = `✓ ${successCount}/${total}`; }
+          batchProgress.successCount = successCount;
+          doneIndices.add(idx);
         } catch (err) {
-          if (dlBtn) dlBtn.textContent = "失败";
+          doneIndices.add(idx);
           console.error("[无水印] 批量下载失败:", err);
         }
       }
@@ -2640,6 +2654,7 @@
       }
 
       batchDownloading = false;
+      batchProgress = { status: "", selectedIndices: null, total: 0, currentNum: 0, currentIndex: -1, successCount: 0, doneIndices: null, isDirect: false };
       batchBtn.dataset.busy = "";
       delete batchBtn.dataset.busy;
       batchBtn.textContent = "批量下载";
@@ -2734,8 +2749,21 @@
         ? (hasDirect ? "API 直链可用" : "无直链，将回退合并")
         : "重叠合并去水印";
       const alt = `图片 ${displayIndex + 1}`;
+      const isSelected = selectedIndices.has(index);
+      const selectedClass = isSelected ? " selected" : "";
+      const checkedAttr = isSelected ? " checked" : "";
+      let dlText = "下载";
+      let dlClass = "nomark-action-btn nomark-download-btn";
+      if (batchProgress.status && batchProgress.selectedIndices?.has(index)) {
+        if (batchProgress.current > index || batchProgress.doneIndices?.has(index)) {
+          dlText = `✓ ${batchProgress.successCount}/${batchProgress.total}`;
+          dlClass += " success";
+        } else if (batchProgress.currentIndex === index) {
+          dlText = `${batchProgress.isDirect ? "下载中" : "合并中"} ${batchProgress.currentNum}/${batchProgress.total}`;
+        }
+      }
       return `
-        <div class="nomark-card" data-record-index="${index}">
+        <div class="nomark-card${selectedClass}" data-record-index="${index}">
           <div class="nomark-preview" title="点击选择图片">
             <img src="${escapeHtml(item.thumbnailUrl)}" alt="${escapeHtml(alt)}" loading="lazy">
             <span class="nomark-card-badge">${escapeHtml(badge)}</span>
@@ -2743,10 +2771,10 @@
             <div class="nomark-preview-tip"><span>${escapeHtml(modeTip)}</span></div>
           </div>
           <div class="nomark-actions">
-            <button class="nomark-action-btn nomark-download-btn" data-record-index="${index}">下载</button>
+            <button class="${dlClass}" data-record-index="${index}">${escapeHtml(dlText)}</button>
             <button class="nomark-action-btn btn-locate" data-record-index="${index}" ${hasElement ? "" : "disabled"}>定位</button>
             <label class="nomark-select-wrap" title="选择图片 ${displayIndex + 1}">
-              <input class="nomark-select" type="checkbox" data-record-index="${index}" aria-label="选择图片 ${displayIndex + 1}">
+              <input class="nomark-select" type="checkbox" data-record-index="${index}"${checkedAttr} aria-label="选择图片 ${displayIndex + 1}">
             </label>
           </div>
         </div>
