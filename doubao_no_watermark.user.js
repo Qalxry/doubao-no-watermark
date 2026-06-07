@@ -24,8 +24,11 @@
   // 2. API 拦截：XHR 拦截 /im/chain/single（历史消息），Fetch 拦截 /chat/completion（实时生成）
   // 3. React Fiber 遍历：从 img/canvas 元素的 Fiber 树中提取 previewImage + downloadImage URL 对
   // 4. 图片合并去水印：previewImage（左上水印）+ downloadImage（右下水印）拼合为无水印图片
-  // 5. 收集系统：DOM 扫描 + API 拦截双通道采集，按图片 key 去重，上限 200 条
-  // 6. UI：悬浮按钮 + 管理面板（图片网格、模式切换、批量下载、定位跳转）
+  //    支持重叠去水印和 API 直链两种模式，直链不可用时自动回退
+  // 5. 收集系统：DOM 扫描 + API 拦截双通道采集，occurrence-aware 去重，上限 200 条
+  // 6. 会话隔离：URL 变化自动清空缓存，RouterData 轻量签名检测变更
+  // 7. UI：悬浮按钮 + 管理面板（图片网格、模式切换、批量下载、定位跳转）
+  //    选择状态和批量下载进度持久化，事件委托，筛选口径一致
 
   // ── 最小化 ZIP 打包器（STORE 模式，无外部依赖）────────────────────────────
   // 纯同步实现，不受页面 polyfill 影响
@@ -483,8 +486,7 @@
       lastConversationId = currentId;
       collectedImages.length = 0;
       collectedImagesMap.clear();
-      selectedIndices.clear();
-      batchProgress = { status: "", selectedIndices: null, total: 0, currentNum: 0, currentIndex: -1, successCount: 0, doneIndices: null, isDirect: false };
+      resetTransientUiState();
       shouldResetScannedElementsWhenRouterReady = true;
       lastRouterSignature = "";
       updateModalCount();
@@ -881,9 +883,27 @@
   const collectedImagesMap = new Map(); // key → index, O(1) 去重
   const MAX_COLLECTED_IMAGES = 200;     // 容量上限，防内存泄漏
   const selectedIndices = new Set();    // 持久化选择状态
-  let batchProgress = { current: 0, total: 0, status: "" }; // 批量下载进度
+  let batchProgress = createEmptyBatchProgress(); // 批量下载进度
   var modalRenderTimer = null;
   var collectionSeq = 0;
+
+  function createEmptyBatchProgress() {
+    return {
+      status: "",
+      selectedIndices: null,
+      total: 0,
+      currentNum: 0,
+      currentIndex: -1,
+      successCount: 0,
+      doneIndices: null,
+      isDirect: false,
+    };
+  }
+
+  function resetTransientUiState() {
+    selectedIndices.clear();
+    batchProgress = createEmptyBatchProgress();
+  }
 
   function scheduleModalRenderIfOpen(immediate = false) {
     if (!document.querySelector("#doubao-nomark-modal.show")) return;
@@ -930,6 +950,19 @@
     return collectedImages.filter(item => !conversationId || item.conversationId === conversationId);
   }
 
+  function isCurrentConversationItem(item) {
+    const conversationId = getConversationId();
+    return Boolean(item && (!conversationId || item.conversationId === conversationId));
+  }
+
+  function isCurrentDisplayItem(item) {
+    return isCurrentConversationItem(item) && (imageFilter === "all" || item.source === imageFilter);
+  }
+
+  function getSelectedDisplayIndices() {
+    return [...selectedIndices].filter(idx => isCurrentDisplayItem(collectedImages[idx]));
+  }
+
   function getImageKeyForDedup(info) {
     return info?.key || extractImageKey(info?.previewImage?.url) || extractImageKey(info?.downloadImage?.url) || "";
   }
@@ -950,22 +983,33 @@
     if (existingIdx !== undefined) {
       const existing = collectedImages[existingIdx];
       let changed = false;
-      if (element && !existing.element) { existing.element = element; changed = true; }
-      if (messageId && !existing.messageId) { existing.messageId = messageId; changed = true; }
-      if (messageId && existing.messageImageIndex == null) {
-        existing.messageImageIndex = collectedImages.filter(item =>
+      const isEarlierOccurrence = createTime && (!existing.createTime || createTime < existing.createTime);
+      const isSamePrimaryOccurrence = createTime && existing.createTime === createTime && (!existing.messageId || !messageId || existing.messageId === messageId);
+      const shouldUpdatePrimaryOccurrence = isEarlierOccurrence || isSamePrimaryOccurrence;
+      if (shouldUpdatePrimaryOccurrence) {
+        if (existing.info !== info) { existing.info = info; changed = true; }
+        if (existing.thumbnailUrl !== info.previewImage.url) { existing.thumbnailUrl = info.previewImage.url; changed = true; }
+      }
+      if (element && (!existing.element || shouldUpdatePrimaryOccurrence)) { existing.element = element; changed = true; }
+      if (messageId && (!existing.messageId || shouldUpdatePrimaryOccurrence)) {
+        if (existing.messageId !== messageId) changed = true;
+        existing.messageId = messageId;
+      }
+      if (messageId && (existing.messageImageIndex == null || shouldUpdatePrimaryOccurrence)) {
+        const nextMessageImageIndex = collectedImages.filter(item =>
           item !== existing
           && item.conversationId === recordConversationId
           && item.messageId === messageId
         ).length;
-        changed = true;
+        if (existing.messageImageIndex !== nextMessageImageIndex) changed = true;
+        existing.messageImageIndex = nextMessageImageIndex;
       }
       if (directUrl && !existing.directUrl) { existing.directUrl = directUrl; changed = true; }
-      if (source && (createTime || directUrl || !existing.source || (!existing.createTime && source !== "ai"))) {
+      if (source && (!existing.source || shouldUpdatePrimaryOccurrence || (!existing.createTime && source !== "ai"))) {
         if (existing.source !== source) changed = true;
         existing.source = source;
       }
-      if (createTime && !existing.createTime) { existing.createTime = createTime; changed = true; }
+      if (createTime && (!existing.createTime || isEarlierOccurrence)) { existing.createTime = createTime; changed = true; }
       if (changed) {
         updateModalCount();
         scheduleModalRenderIfOpen();
@@ -1276,8 +1320,7 @@
       lastScanUrl = location.href;
       collectedImages.length = 0;
       collectedImagesMap.clear();
-      selectedIndices.clear();
-      batchProgress = { status: "", selectedIndices: null, total: 0, currentNum: 0, currentIndex: -1, successCount: 0, doneIndices: null, isDirect: false };
+      resetTransientUiState();
       shouldResetScannedElementsWhenRouterReady = true;
       lastRouterSignature = "";
       updateModalCount();
@@ -1617,7 +1660,7 @@
   // ── 悬浮按钮 + 模态框 UI ──────────────────────────────
   // 说明：仅重写前端 UI 与交互状态，不改动图片扫描、合并、下载、ZIP 打包等核心逻辑。
   const NOMARK_BUTTON_HOST_ID = "doubao-nomark-button-host";
-  const NOMARK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.65"><path d="M3 13.25v-6.5h18v6.5c0 3.62 0 5.43-1.12 6.55S16.95 20.92 13.33 20.92h-2.66c-3.62 0-5.43 0-6.55-1.12S3 16.87 3 13.25Z"/><path d="m3 6.75.56-.75c1.1-1.47 1.66-2.21 2.45-2.61C6.8 3 7.72 3 9.56 3h4.88c1.84 0 2.76 0 3.55.39.79.4 1.35 1.14 2.45 2.61l.56.75M15.1 13.75s-2.3 3.05-3.1 3.05-3.1-3.05-3.1-3.05M12 16.45v-6.3"/></g></svg>`;
+  const NOMARK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7"><rect x="3.5" y="5" width="17" height="14" rx="3"/><circle cx="8.2" cy="9.2" r="1.25"/><path d="m5.8 16 4.15-4.15a1.35 1.35 0 0 1 1.9 0L14 14l1.15-1.15a1.35 1.35 0 0 1 1.9 0L18.7 14.5"/></g></svg>`;
 
   let floatingBtnElement = null;
   let modalElement = null;
@@ -1707,7 +1750,7 @@
 
   function updateSelectedCount() {
     if (!modalElement) return;
-    const selectedCount = modalElement.querySelectorAll(".nomark-select:checked").length;
+    const selectedCount = getSelectedDisplayIndices().length;
     const selectedEl = modalElement.querySelector(".nomark-selected-count");
     const batchBtn = modalElement.querySelector(".btn-batch-download");
     if (selectedEl) selectedEl.textContent = String(selectedCount);
@@ -2545,9 +2588,8 @@
     });
 
     selectAllBtn.addEventListener("click", () => {
-      const currentConversationId = getConversationId();
       collectedImages.forEach((item, idx) => {
-        if (!currentConversationId || item.conversationId === currentConversationId) {
+        if (isCurrentDisplayItem(item)) {
           selectedIndices.add(idx);
         }
       });
@@ -2565,10 +2607,7 @@
     batchBtn.addEventListener("click", async () => {
       if (batchDownloading) { batchCancel = true; return; }
 
-      const selected = [...selectedIndices].filter(idx => {
-        const item = collectedImages[idx];
-        return item && (!getConversationId() || item.conversationId === getConversationId());
-      });
+      const selected = getSelectedDisplayIndices();
       if (selected.length === 0) { showToast("请先选择要下载的图片", 3000); return; }
 
       console.log(`[无水印] 批量下载开始，共 ${selected.length} 张图片`);
@@ -2584,6 +2623,7 @@
       const total = selected.length;
       const doneIndices = new Set();
       batchProgress = { status: "downloading", selectedIndices: new Set(selected), total, currentNum: 0, currentIndex: -1, successCount: 0, doneIndices, isDirect: false };
+      renderModalImages();
 
       for (let i = 0; i < selected.length; i++) {
         if (batchCancel) break;
@@ -2593,6 +2633,7 @@
 
         batchProgress.currentIndex = idx;
         batchProgress.currentNum = i + 1;
+        renderModalImages();
 
         try {
           const isDirect = downloadMode === "direct" && item.directUrl;
@@ -2626,8 +2667,10 @@
           successCount++;
           batchProgress.successCount = successCount;
           doneIndices.add(idx);
+          renderModalImages();
         } catch (err) {
           doneIndices.add(idx);
+          renderModalImages();
           console.error("[无水印] 批量下载失败:", err);
         }
       }
@@ -2654,7 +2697,7 @@
       }
 
       batchDownloading = false;
-      batchProgress = { status: "", selectedIndices: null, total: 0, currentNum: 0, currentIndex: -1, successCount: 0, doneIndices: null, isDirect: false };
+      batchProgress = createEmptyBatchProgress();
       batchBtn.dataset.busy = "";
       delete batchBtn.dataset.busy;
       batchBtn.textContent = "批量下载";
@@ -2755,7 +2798,7 @@
       let dlText = "下载";
       let dlClass = "nomark-action-btn nomark-download-btn";
       if (batchProgress.status && batchProgress.selectedIndices?.has(index)) {
-        if (batchProgress.current > index || batchProgress.doneIndices?.has(index)) {
+        if (batchProgress.doneIndices?.has(index)) {
           dlText = `✓ ${batchProgress.successCount}/${batchProgress.total}`;
           dlClass += " success";
         } else if (batchProgress.currentIndex === index) {
