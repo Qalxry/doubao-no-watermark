@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         豆包无水印图片下载
 // @namespace    http://tampermonkey.net/
-// @version      2.3.0
+// @version      2.3.1
 // @description  为豆包添加无水印图片下载功能（适配新版 canvas 侧栏与图片消息结构）- UI 重写版
 // @author       Qalxry,Zhanghuaimin-233
 // @license      GPL-3.0
@@ -839,18 +839,70 @@
     return path;
   }
 
-  function getImageInfoFromEvent(e) {
-    const path = getEventPath(e).filter(node => isElement(node));
-    const targetUrl = path
+  function uniqueElements(elements) {
+    return elements.filter((el, index) => el && elements.indexOf(el) === index);
+  }
+
+  function getPointMediaElements(e) {
+    if (!Number.isFinite(e?.clientX) || !Number.isFinite(e?.clientY)) return [];
+
+    const elementsAtPoint = typeof document.elementsFromPoint === "function"
+      ? document.elementsFromPoint(e.clientX, e.clientY)
+      : [];
+    const pointMedia = elementsAtPoint
+      .filter(node => isElement(node))
+      .flatMap(el => {
+        const media = [];
+        if (el.matches?.("img,canvas")) media.push(el);
+        const closestMedia = el.closest?.("img,canvas");
+        if (closestMedia && closestMedia !== el) media.push(closestMedia);
+        return media;
+      });
+
+    const rectMedia = [...document.querySelectorAll("canvas,img")].filter(el => {
+      const rect = el.getBoundingClientRect();
+      return rect.width >= MIN_ELEMENT_SIZE
+        && rect.height >= MIN_ELEMENT_SIZE
+        && e.clientX >= rect.left
+        && e.clientX <= rect.right
+        && e.clientY >= rect.top
+        && e.clientY <= rect.bottom;
+    });
+
+    return uniqueElements([...pointMedia, ...rectMedia]);
+  }
+
+  function getImageInfoFromPoint(e) {
+    const elements = getPointMediaElements(e);
+    const targetUrl = elements
       .map(el => el.currentSrc || el.src || "")
       .find(Boolean) || "";
 
-    for (const el of path) {
+    for (const el of elements) {
       const info = getImageInfoFromElement(el, targetUrl);
       if (info) return info;
     }
 
     return null;
+  }
+
+  function getImageInfoFromEvent(e) {
+    const path = getEventPath(e).filter(node => isElement(node));
+    const elements = uniqueElements([...path, ...getPointMediaElements(e)]);
+    const targetUrl = elements
+      .map(el => el.currentSrc || el.src || "")
+      .find(Boolean) || "";
+
+    for (const el of elements) {
+      const info = getImageInfoFromElement(el, targetUrl);
+      if (info) return info;
+    }
+
+    return null;
+  }
+
+  function hasImageContextTarget(e) {
+    return !!e.target.closest?.("img,canvas") || getPointMediaElements(e).length > 0;
   }
 
   function getBestVisibleImageInfo() {
@@ -1423,13 +1475,13 @@
   let lastContextMenuHadImage = false;
 
   document.addEventListener("contextmenu", (e) => {
-    if (!e.target.closest?.("img,canvas")) {
+    if (!hasImageContextTarget(e)) {
       lastContextMenuHadImage = false;
       return;
     }
 
     lastContextMenuHadImage = true;
-    const eventResult = getImageInfoFromEvent(e);
+    const eventResult = getImageInfoFromEvent(e) || getImageInfoFromPoint(e);
     capturedImageInfo = eventResult?.info || eventResult || null;
     capturedAt = Date.now();
     if (!capturedImageInfo) {
