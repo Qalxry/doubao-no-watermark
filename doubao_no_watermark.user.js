@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         豆包无水印图片下载
 // @namespace    http://tampermonkey.net/
-// @version      2.3.1
-// @description  为豆包添加无水印图片下载功能（适配新版 canvas 侧栏与图片消息结构）- UI 重写版
+// @version      3.0.0
+// @description  为豆包添加无水印图片下载与提示词管理功能
 // @author       Qalxry,Zhanghuaimin-233
 // @license      GPL-3.0
 // @supportURL   https://github.com/Qalxry/doubao-no-watermark
@@ -2748,7 +2748,7 @@
           const local = existingMap.get(imp.id);
           if (!local) { toAdd.push(imp); } else { if (local.content === imp.content && local.updatedAt === imp.updatedAt) continue; conflicts.push({ local, imported: imp }); }
         }
-        if (conflicts.length === 0) { this._prompts.push(...toAdd); await StorageService.save(this._prompts); this.renderList(); showToast(`已导入 ${toAdd.length} 条提示词`); return; }
+        if (conflicts.length === 0) { const nextOrder = Math.max(0, ...this._prompts.map(p => p.sortOrder ?? 0)) + 1; toAdd.forEach((p, i) => { p.sortOrder = nextOrder + i; }); this._prompts.push(...toAdd); await StorageService.save(this._prompts); this.render(); showToast(`已导入 ${toAdd.length} 条提示词`); return; }
         this._showImportConflictDialog(toAdd, conflicts);
       } catch (err) { showToast('导入失败：' + err.message); }
     },
@@ -2800,7 +2800,7 @@
       overlay.querySelector('#pm-conflict-confirm').addEventListener('click', async () => {
         if (!mode) { showToast('请先选择处理方式'); return; }
         for (const [id, action] of resolutions) { if (action === 'replace') { const imp = conflicts.find(c => c.imported.id === id)?.imported; if (imp) { const idx = this._prompts.findIndex(p => p.id === id); if (idx !== -1) this._prompts[idx] = imp; } } }
-        this._prompts.push(...toAdd); await StorageService.save(this._prompts); overlay.remove(); this.renderList();
+        const nextOrder = Math.max(0, ...this._prompts.map(p => p.sortOrder ?? 0)) + 1; toAdd.forEach((p, i) => { p.sortOrder = nextOrder + i; }); this._prompts.push(...toAdd); await StorageService.save(this._prompts); overlay.remove(); this.render();
         showToast(`已导入 ${toAdd.length} 条新增，${[...resolutions.values()].filter(a => a === 'replace').length} 条替换`);
       });
       overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
