@@ -29,6 +29,7 @@
     CATEGORIES_KEY: 'promptManager.categories',
     FREQUENT_ORDER_KEY: 'promptManager.frequentOrder',
     CAT_ORDER_KEY: 'promptManager.categoryOrder',
+    HELP_SEEN_KEY: 'promptManager.helpSeen',
     DEFAULT_CATEGORIES: ['通用模板', '人物描述', '风格', '构图', '光影与质感', '负面提示词', '文字与签名'],
   };
 
@@ -229,7 +230,7 @@
     },
 
     _isOwnUi(el) {
-      return !!el?.closest?.('#doubao-nomark-modal, .pm-modal-overlay, .pm-panel, .pm-fab');
+      return !!el?.closest?.('#doubao-nomark-modal, #doubao-prompt-modal, .pm-modal-overlay, .pm-panel, .pm-fab');
     },
 
     _findEditor() {
@@ -1875,6 +1876,59 @@
     });
   }
 
+  let promptHelpDialogOpen = false;
+  async function showPromptHelpDialog({ remember = false } = {}) {
+    if (promptHelpDialogOpen) return;
+    promptHelpDialogOpen = true;
+    try {
+      await showPromptDialog({
+        title: "使用说明",
+        body: `
+          <div class="pm-help-dialog">
+            <b>提示词库</b>用于管理、检索和快速填入提示词到豆包输入框。<br><br>
+            <b>基本功能：</b><br>
+            · 点击「填入」将提示词追加到输入框<br>
+            · 点击「发送」将提示词填入并自动发送<br>
+            · 点击「收藏」将提示词置顶<br>
+            · 拖拽分类或卡片可调整顺序<br><br>
+            <b>模板变量：</b><br>
+            在提示词中用 <code>{变量名}</code> 定义占位符。<br>
+            可设置默认值：<code>{变量名='默认值'}</code><br>
+            输入框为空时自动使用默认值，有非引号内容时正常追加。<br><br>
+            <b>传参格式：</b><br>
+            输入框中用引号包裹参数，支持 <code>'</code> <code>"</code> <code>‘’</code> <code>“”</code>，开头结尾必须是同一种引号。<br>
+            参数用 <code>|</code> 分隔。<br><br>
+            <b>示例 1 — 顺序传参：</b><br>
+            提示词：<code>画一幅{主体}在{场景}的{风格}画</code><br>
+            输入框：<code>'猫|花园|水彩'</code><br>
+            结果：<code>画一幅猫在花园的水彩画</code><br><br>
+            <b>示例 2 — 命名传参：</b><br>
+            输入框：<code>'主体=猫|风格=水彩'</code><br>
+            结果：<code>画一幅猫在{场景}的水彩画</code><br><br>
+            <b>示例 3 — 混用传参：</b><br>
+            输入框：<code>'猫|场景=花园|水彩'</code><br>
+            结果：<code>画一幅猫在花园的水彩画</code><br><br>
+            <b>示例 4 — 跳过变量：</b><br>
+            输入框：<code>'猫||水彩'</code><br>
+            结果：<code>画一幅猫在{场景}的水彩画</code>（空位跳过）<br><br>
+            <b>示例 5 — 默认值：</b><br>
+            提示词：<code>画一幅{主体='猫'}在{场景}的{风格}画</code><br>
+            输入框：（空）<br>
+            结果：<code>画一幅猫在{场景}的{风格}画</code><br><br>
+            <b>示例 6 — 空位触发默认值：</b><br>
+            输入框：<code>'|花园|水彩'</code><br>
+            结果：<code>画一幅猫在花园的水彩画</code><br><br>
+            <b>转义：</b> <code>\\|</code> 竖线 · <code>\\\\</code> 反斜杠 · <code>\\n</code> 换行
+          </div>
+        `,
+        confirmText: "知道了",
+      });
+      if (remember) await GM_setValue(PromptConfig.HELP_SEEN_KEY, true);
+    } finally {
+      promptHelpDialogOpen = false;
+    }
+  }
+
   // ── 右键时捕获 imageInfo ────────────────────────────────────────────────────
   let capturedImageInfo = null;
   let capturedAt = 0;
@@ -2942,6 +2996,19 @@
         box-shadow: 0 22px 46px rgba(79,124,255,0.20), 0 12px 28px rgba(15,23,42,0.12);
       }
       #doubao-prompt-btn:active { transform: translateY(0) scale(.98); }
+      #doubao-prompt-btn::after {
+        content: "";
+        position: absolute;
+        inset: -5px;
+        border-radius: 22px;
+        border: 1px solid rgba(79,124,255,.28);
+        animation: promptPulse 1.8s ease-out infinite;
+        pointer-events: none;
+      }
+      @keyframes promptPulse {
+        0% { opacity: .70; transform: scale(.96); }
+        100% { opacity: 0; transform: scale(1.16); }
+      }
     `;
     wrapper.appendChild(style);
     const btn = document.createElement("button");
@@ -2968,11 +3035,21 @@
     promptModalElement.classList.add("show");
     document.documentElement.classList.add("doubao-nomark-modal-open");
     LibraryUI.render();
+    showPromptHelpOnFirstOpen();
   }
 
   function closePromptModal() {
     if (promptModalElement) promptModalElement.classList.remove("show");
     document.documentElement.classList.remove("doubao-nomark-modal-open");
+  }
+
+  async function showPromptHelpOnFirstOpen() {
+    try {
+      const seen = await GM_getValue(PromptConfig.HELP_SEEN_KEY);
+      if (!seen) await showPromptHelpDialog({ remember: true });
+    } catch (e) {
+      console.log('[无水印] 首次提示词说明弹出失败:', e);
+    }
   }
 
   function createPromptModal() {
@@ -2990,17 +3067,22 @@
         --nomark-soft: #f6f7f9;
         --nomark-border: rgba(229, 231, 235, 0.92);
         --nomark-card: rgba(255, 255, 255, 0.96);
-        position: fixed; top: 0; right: 0; width: 430px; height: 100vh;
-        z-index: 2147483645; transform: translateX(100%);
-        transition: transform .24s cubic-bezier(.2,.8,.2,1);
+        position: fixed; right: 24px; bottom: 160px;
+        width: 410px; max-width: calc(100vw - 48px);
+        height: min(72vh, 760px);
+        z-index: 2147483645;
+        transform: translateY(12px) scale(.98);
+        opacity: 0; pointer-events: none;
+        transition: transform .24s cubic-bezier(.2,.8,.2,1), opacity .18s ease, box-shadow .18s ease;
         background: var(--nomark-card);
-        border-left: 1px solid var(--nomark-border);
+        border: 1px solid var(--nomark-border);
+        border-radius: 20px;
         display: flex; flex-direction: column; overflow: hidden;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", "Microsoft YaHei", sans-serif;
         font-size: 14px; color: var(--nomark-ink);
-        box-shadow: -4px 0 24px rgba(0,0,0,0.08);
+        box-shadow: 0 18px 55px rgba(15,23,42,.18), 0 0 0 1px rgba(255,255,255,.62);
       }
-      #doubao-prompt-modal.show { transform: translateX(0); }
+      #doubao-prompt-modal.show { transform: translateY(0) scale(1); opacity: 1; pointer-events: auto; }
       .pm-topbar {
         display: flex; align-items: center; gap: 8px;
         padding: 12px 14px; border-bottom: 1px solid var(--nomark-border);
@@ -3015,6 +3097,7 @@
         display: inline-flex; align-items: center; gap: 5px;
         transition: all .15s;
       }
+      #pm-btn-help { width: 30px; padding: 0; justify-content: center; font-weight: 800; }
       .pm-topbar-btn:hover { background: var(--nomark-border); color: var(--nomark-ink); border-color: var(--nomark-border); }
       .pm-add-bar {
         padding: 10px 14px; border-top: 1px solid var(--nomark-border);
@@ -3165,6 +3248,24 @@
         background: var(--nomark-border); color: var(--nomark-ink);
         border-color: var(--nomark-border); transform: translateY(-1px);
       }
+      #doubao-prompt-modal .pm-item-actions button,
+      #doubao-prompt-modal .pm-add-btn,
+      #doubao-prompt-modal .pm-export-btn {
+        min-height: 36px; padding: 0 6px; gap: 0;
+      }
+      #doubao-prompt-modal .pm-item-actions button .pm-btn-label,
+      #doubao-prompt-modal .pm-add-btn .pm-btn-label,
+      #doubao-prompt-modal .pm-export-btn .pm-btn-label {
+        display: none;
+      }
+      #doubao-prompt-modal .pm-item-actions button .pm-btn-ico,
+      #doubao-prompt-modal .pm-add-btn .pm-btn-ico,
+      #doubao-prompt-modal .pm-export-btn .pm-btn-ico {
+        font-size: 15px;
+      }
+      #doubao-prompt-modal .pm-add-bar { gap: 8px; align-items: stretch; }
+      #doubao-prompt-modal .pm-add-btn { flex: 1; }
+      #doubao-prompt-modal .pm-export-btn { flex: 0 0 84px; width: 84px; min-width: 84px; }
       .pm-btn-ico { font-size: 12px; }
       .pm-list.pm-reordering { user-select: none; }
       .pm-list.pm-reordering .pm-item:not(.pm-lifted) { transition: transform .34s cubic-bezier(.16,1,.3,1), box-shadow .18s ease, border-color .18s ease, background .18s ease; }
@@ -3336,10 +3437,19 @@
       }
       .pm-conflict-btn:hover { border-color: var(--nomark-accent, #ff6060); }
       .pm-conflict-btn.pm-conflict-active { background: var(--nomark-accent, #ff6060); color: #fff; border-color: var(--nomark-accent, #ff6060); }
-      .pm-footer {
-        padding: 10px 14px; border-top: 1px solid var(--nomark-border);
-        display: flex; align-items: center; justify-content: space-between;
-        flex-shrink: 0; font-size: 11px; color: var(--nomark-muted);
+      .pm-help-dialog {
+        font-size: 13px; line-height: 1.8; color: var(--nomark-ink);
+      }
+      .pm-help-dialog code {
+        padding: 1px 4px; border-radius: 5px;
+        background: rgba(255,96,96,.08); color: var(--nomark-accent, #ff6060);
+        font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      }
+      @media (max-width: 760px) {
+        #doubao-prompt-modal {
+          left: 12px; right: 12px; bottom: 158px;
+          width: auto; max-width: none; height: 72vh;
+        }
       }
     `;
     modal.appendChild(style);
@@ -3347,6 +3457,7 @@
       <div class="pm-topbar">
         <h3>提示词库</h3>
         <span class="pm-topbar-spacer"></span>
+        <button class="pm-topbar-btn" id="pm-btn-help" title="使用说明">?</button>
         <button class="pm-topbar-btn" id="pm-btn-close" title="关闭">✕ 关闭</button>
       </div>
       <div class="pm-search-bar">
@@ -3360,13 +3471,10 @@
         <button class="pm-export-btn" id="pm-btn-export" title="导出 JSON"><span class="pm-btn-ico">📤</span><span class="pm-btn-label">导出</span></button>
         <input type="file" id="pm-file-input" accept=".json" style="display:none" />
       </div>
-      <div class="pm-footer">
-        <span>拖拽排序 · 模板变量 {变量名} · Ctrl+Enter 保存</span>
-        <span>Esc 关闭</span>
-      </div>
     `;
     document.body.appendChild(modal);
     promptModalElement = modal;
+    document.getElementById('pm-btn-help').addEventListener('click', () => showPromptHelpDialog());
     document.getElementById('pm-btn-close').addEventListener('click', closePromptModal);
     document.getElementById('pm-btn-add').addEventListener('click', () => LibraryUI.showEditModal());
     document.getElementById('pm-btn-import').addEventListener('click', () => document.getElementById('pm-file-input').click());
@@ -3573,7 +3681,10 @@
     `;
     document.body.appendChild(wrapper);
     floatingBtnElement = wrapper.querySelector("#doubao-nomark-btn");
-    floatingBtnElement.addEventListener("click", openModal);
+    floatingBtnElement.addEventListener("click", () => {
+      if (modalElement && modalElement.classList.contains("show")) closeModal();
+      else openModal();
+    });
     updateModalCount();
   }
 
