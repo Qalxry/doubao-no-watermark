@@ -10,6 +10,10 @@
 // @match        https://*.doubao.com/*
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_registerMenuCommand
 // @connect      byteimg.com
 // @connect      *.byteimg.com
 // ==/UserScript==
@@ -18,6 +22,350 @@
   "use strict";
   const pageWindow = (typeof unsafeWindow !== "undefined") ? unsafeWindow : window;
   console.log("[无水印] 脚本开始执行");
+
+  // ── 提示词库：配置与工具函数 ──────────────────────────────────────────────
+  const PromptConfig = {
+    STORAGE_KEY: 'promptManager.prompts',
+    CATEGORIES_KEY: 'promptManager.categories',
+    FREQUENT_ORDER_KEY: 'promptManager.frequentOrder',
+    CAT_ORDER_KEY: 'promptManager.categoryOrder',
+    DEFAULT_CATEGORIES: ['通用模板', '人物描述', '风格', '构图', '光影与质感', '负面提示词', '文字与签名'],
+  };
+
+  function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function escAttr(s) { return escHtml(String(s)).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+  // ── 提示词库：存储服务 ────────────────────────────────────────────────────
+  const StorageService = {
+    async load() {
+      let prompts = (await GM_getValue(PromptConfig.STORAGE_KEY)) || [];
+      let migrated = false;
+      for (const p of prompts) {
+        if (p.lastUsedAt === undefined) { p.lastUsedAt = null; migrated = true; }
+        if (p.editedAt !== undefined) { delete p.editedAt; migrated = true; }
+        if (p.sortOrder === undefined) { p.sortOrder = 0; migrated = true; }
+      }
+      if (migrated) {
+        const sorted = [...prompts].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+        sorted.forEach((p, i) => { p.sortOrder = i; });
+        await GM_setValue(PromptConfig.STORAGE_KEY, prompts);
+      }
+      return prompts;
+    },
+    async save(prompts) {
+      await GM_setValue(PromptConfig.STORAGE_KEY, prompts);
+    },
+    async loadCategories() {
+      const stored = await GM_getValue(PromptConfig.CATEGORIES_KEY);
+      if (stored && Array.isArray(stored)) return stored;
+      await GM_setValue(PromptConfig.CATEGORIES_KEY, [...PromptConfig.DEFAULT_CATEGORIES]);
+      return [...PromptConfig.DEFAULT_CATEGORIES];
+    },
+    async saveCategories(cats) {
+      await GM_setValue(PromptConfig.CATEGORIES_KEY, cats);
+    },
+    async loadFrequentOrder() {
+      return (await GM_getValue(PromptConfig.FREQUENT_ORDER_KEY)) || [];
+    },
+    async saveFrequentOrder(order) {
+      await GM_setValue(PromptConfig.FREQUENT_ORDER_KEY, order);
+    },
+    async loadCategoryOrder() {
+      return (await GM_getValue(PromptConfig.CAT_ORDER_KEY)) || [];
+    },
+    async saveCategoryOrder(order) {
+      await GM_setValue(PromptConfig.CAT_ORDER_KEY, order);
+    },
+    exportJSON(prompts) {
+      const exported = prompts.map(({ usageCount, lastUsedAt, sortOrder, ...rest }) => rest);
+      const data = { app: 'Prompt Manager', schemaVersion: 1, exportedAt: new Date().toISOString(), prompts: exported };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `prompt-manager-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+    async importJSON(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const data = JSON.parse(reader.result);
+            if (!data.prompts || !Array.isArray(data.prompts)) { reject(new Error('无效的提示词备份文件')); return; }
+            resolve(data.prompts);
+          } catch (e) { reject(new Error('文件解析失败')); }
+        };
+        reader.onerror = () => reject(new Error('文件读取失败'));
+        reader.readAsText(file);
+      });
+    },
+  };
+
+  // ── 提示词库：提示词服务 ──────────────────────────────────────────────────
+  const PromptService = {
+    create(data) {
+      return {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        title: data.title || '',
+        content: data.content || '',
+        category: data.category || '通用模板',
+        tags: data.tags || [],
+        favorite: false,
+        usageCount: 0,
+        sortOrder: data.sortOrder || 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastUsedAt: null,
+      };
+    },
+    update(prompt, data) {
+      return { ...prompt, ...data, updatedAt: new Date().toISOString() };
+    },
+    search(keyword, prompts) {
+      if (!keyword) return prompts;
+      const kw = keyword.toLowerCase();
+      return prompts.filter(p =>
+        p.title.toLowerCase().includes(kw) ||
+        p.content.toLowerCase().includes(kw) ||
+        (p.tags || []).some(t => t.toLowerCase().includes(kw))
+      );
+    },
+    filterByCategory(category, prompts) {
+      if (!category || category === '全部') return prompts;
+      return prompts.filter(p => p.category === category);
+    },
+  };
+
+  // ── 提示词库：模板变量系统 ────────────────────────────────────────────────
+  function parseTemplate(template) {
+    const variables = [];
+    const seen = new Set();
+    template.replace(/{([^{}]+)}/g, (_, inner) => {
+      const eqIdx = inner.indexOf("=");
+      const varName = (eqIdx > -1 ? inner.slice(0, eqIdx) : inner).trim();
+      if (!seen.has(varName)) {
+        seen.add(varName);
+        const defaultVal = eqIdx > -1 ? inner.slice(eqIdx + 1).replace(/^['"‘“]|['"’”]$/g, "") : null;
+        variables.push({ name: varName, defaultVal: defaultVal || null });
+      }
+      return "";
+    });
+    return variables;
+  }
+
+  function unwrapInput(text) {
+    const s = text;
+    if (s.length >= 2) {
+      const o = s.charCodeAt(0);
+      const c = s.charCodeAt(s.length - 1);
+      if ((o === 39 && c === 39) || (o === 34 && c === 34) ||
+        (o === 8216 && c === 8217) || (o === 8220 && c === 8221)) {
+        return { raw: s.slice(1, -1) };
+      }
+    }
+    return { error: "输入内容必须整体由一组成对引号包裹" };
+  }
+
+  function splitEscaped(raw) {
+    if (raw === '') return [];
+    return raw.split(/(?<!\\)\|/).map(s =>
+      s.replace(/\\\|/g, '|').replace(/\\\\/g, '\\').replace(/\\n/g, '\n')
+    );
+  }
+
+  function resolveArgs(variables, tokens) {
+    const values = {};
+    const occupied = new Set();
+    const skipped = new Set();
+    const errors = [];
+    let pointer = 0;
+    const varNames = new Set(variables.map(v => v.name));
+
+    for (const token of tokens) {
+      const eqIdx = token.indexOf('=');
+      const isNamed = eqIdx > 0 && varNames.has(token.slice(0, eqIdx));
+
+      if (isNamed) {
+        const name = token.slice(0, eqIdx);
+        const val = token.slice(eqIdx + 1);
+        if (occupied.has(name)) { errors.push('变量「' + name + '」被重复赋值'); continue; }
+        if (val === '') { skipped.add(name); occupied.add(name); }
+        else { values[name] = val; occupied.add(name); }
+      } else if (eqIdx > 0 && /^[a-zA-Z0-9_一-鿿㐀-䶿]+$/.test(token.slice(0, eqIdx))) {
+        errors.push('未知变量「' + token.slice(0, eqIdx) + '」，模板中不存在该变量');
+      } else {
+        while (pointer < variables.length && occupied.has(variables[pointer].name)) pointer++;
+        if (pointer >= variables.length) { errors.push("顺序参数过多，多余：「" + token + "」"); continue; }
+        const v = variables[pointer];
+        if (token === "") { skipped.add(v.name); occupied.add(v.name); }
+        else { values[v.name] = token; occupied.add(v.name); }
+        pointer++;
+      }
+    }
+    return { values, skipped, occupied, errors };
+  }
+
+  function fillTemplate(template, variables, result) {
+    if (!result) return template;
+    return template.replace(/{([^{}]+)}/g, (fullMatch, inner) => {
+      const eqIdx = inner.indexOf("=");
+      const varName = (eqIdx > -1 ? inner.slice(0, eqIdx) : inner).trim();
+      const defaultVal = eqIdx > -1 ? inner.slice(eqIdx + 1).replace(/^['"‘“]|['"’”]$/g, "") : null;
+      if (varName in result.values) return result.values[varName];
+      if (result.skipped.has(varName) && defaultVal) return defaultVal;
+      if (defaultVal) return defaultVal;
+      return fullMatch;
+    });
+  }
+
+  // ── 提示词库：豆包输入框适配器 ──────────────────────────────────────────
+  const SiteAdapter = {
+    _editorEl: null,
+
+    _isVisible(el) {
+      return !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    },
+
+    _isOwnUi(el) {
+      return !!el?.closest?.('#doubao-nomark-modal, .pm-modal-overlay, .pm-panel, .pm-fab');
+    },
+
+    _findEditor() {
+      // 豆包输入框探测：按优先级尝试
+      const doc = pageWindow.document || document;
+      const isTarget = el => this._isVisible(el) && !this._isOwnUi(el);
+      const doubaoTextarea = [...doc.querySelectorAll('textarea')]
+        .find(el => isTarget(el) && (el.placeholder || '').includes('发消息'));
+      if (doubaoTextarea) return { type: 'textarea', el: doubaoTextarea };
+      // 1. contenteditable div（豆包常用）
+      const editable = [...doc.querySelectorAll('[contenteditable="true"]')].find(isTarget);
+      if (editable) return { type: 'contenteditable', el: editable };
+      // 2. textarea
+      const ta = [...doc.querySelectorAll('textarea')].find(isTarget);
+      if (ta) return { type: 'textarea', el: ta };
+      // 3. 带 role="textbox" 的元素
+      const textbox = [...doc.querySelectorAll('[role="textbox"]')].find(isTarget);
+      if (textbox) return { type: 'contenteditable', el: textbox };
+      return null;
+    },
+
+    getEditor() {
+      if (this._editorEl && this._editorEl.el?.isConnected && this._isVisible(this._editorEl.el) && !this._isOwnUi(this._editorEl.el)) return this._editorEl;
+      this._editorEl = this._findEditor();
+      return this._editorEl;
+    },
+
+    getInputText() {
+      const editor = this.getEditor();
+      if (!editor) return '';
+      if (editor.type === 'textarea') return editor.el.value;
+      return editor.el.textContent || '';
+    },
+
+    _dispatchTextareaInput(el, data, inputType = 'insertText') {
+      const InputEventCtor = pageWindow.InputEvent || InputEvent;
+      const EventCtor = pageWindow.Event || Event;
+      let inputEvent;
+      try {
+        inputEvent = new InputEventCtor('input', { bubbles: true, cancelable: true, inputType, data });
+      } catch (e) {
+        inputEvent = new EventCtor('input', { bubbles: true, cancelable: true });
+      }
+      el.dispatchEvent(inputEvent);
+      el.dispatchEvent(new EventCtor('change', { bubbles: true }));
+    },
+
+    _setTextareaValue(el, value, data = value, inputType = 'insertText') {
+      const TextareaCtor = pageWindow.HTMLTextAreaElement || HTMLTextAreaElement;
+      const nativeSetter = Object.getOwnPropertyDescriptor(TextareaCtor.prototype, 'value')?.set;
+      el.focus();
+      if (nativeSetter) nativeSetter.call(el, value);
+      else el.value = value;
+      if (typeof el.setSelectionRange === 'function') el.setSelectionRange(value.length, value.length);
+      this._dispatchTextareaInput(el, data, inputType);
+    },
+
+    findSendButton() {
+      const doc = pageWindow.document || document;
+      const editor = this.getEditor();
+      const scopes = [
+        editor?.el?.closest?.('.input-content-container-bMefgL'),
+        editor?.el?.closest?.('[class*="input-content-container"]'),
+        editor?.el?.closest?.('[class*="input-guidance"]'),
+        doc,
+      ].filter(Boolean);
+      const selectors = [
+        '.send-btn-wrapper button',
+        '[data-testid="send-button"]',
+        'button[class*="send"]',
+        'button[class*="submit"]',
+        'button[type="submit"]',
+      ];
+      for (const scope of scopes) {
+        for (const selector of selectors) {
+          const btn = [...scope.querySelectorAll(selector)].find(el =>
+            this._isVisible(el) &&
+            !this._isOwnUi(el) &&
+            !el.disabled &&
+            el.getAttribute('data-disabled') !== 'true' &&
+            el.getAttribute('aria-disabled') !== 'true'
+          );
+          if (btn) return btn;
+        }
+      }
+      return null;
+    },
+
+    insertText(text, mode = 'append') {
+      const editor = this.getEditor();
+      if (!editor) return false;
+      try {
+        if (editor.type === 'textarea') {
+          const el = editor.el;
+          const nextValue = mode === 'replace' ? text : el.value + text;
+          this._setTextareaValue(el, nextValue, text, 'insertText');
+          return true;
+        }
+        // contenteditable
+        const el = editor.el;
+        el.focus();
+        if (mode === 'replace') {
+          el.textContent = '';
+        }
+        // 使用 execCommand 插入文本（保留 undo 历史）
+        document.execCommand('insertText', false, text);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      } catch (e) {
+        console.log('[无水印] insertText error:', e);
+        return false;
+      }
+    },
+
+    clearInput() {
+      const editor = this.getEditor();
+      if (!editor) return false;
+      try {
+        if (editor.type === 'textarea') {
+          this._setTextareaValue(editor.el, '', null, 'deleteContentBackward');
+          return true;
+        }
+        editor.el.textContent = '';
+        editor.el.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      } catch (e) { return false; }
+    },
+  };
+
+  function readArgsFromEditor() {
+    const text = SiteAdapter.getInputText().trim();
+    if (!text) return null;
+    const unwrapped = unwrapInput(text);
+    if (unwrapped.error) return null;
+    return { tokens: splitEscaped(unwrapped.raw) };
+  }
 
   // ── 脚本架构概述 ──────────────────────────────────────────────────────────
   // 1. ZIP 打包器：纯同步实现，不依赖 JSZip（豆包页面 polyfill 会卡死 JSZip）
@@ -1469,6 +1817,64 @@
     }, duration);
   }
 
+  function showPromptDialog({ title, body, input, inputValue, confirmText, cancelText, danger }) {
+    return new Promise(resolve => {
+      const overlay = document.createElement("div");
+      overlay.className = "pm-modal-overlay";
+      overlay.innerHTML = `
+        <div class="pm-modal pm-dialog-modal">
+          <h4>${escHtml(title)}</h4>
+          ${body ? `<div class="pm-dialog-body">${body}</div>` : ""}
+          ${input !== undefined ? `<input class="pm-dialog-input" type="text" value="${escAttr(inputValue || "")}" placeholder="${escAttr(input || "")}" />` : ""}
+          <div class="pm-modal-btns">
+            <button class="pm-btn-cancel" id="pm-dialog-cancel">${cancelText || "取消"}</button>
+            <button class="${danger ? "pm-btn-danger" : "pm-btn-save"}" id="pm-dialog-confirm">${confirmText || "确认"}</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+
+      const inputEl = overlay.querySelector(".pm-dialog-input");
+      if (inputEl) setTimeout(() => inputEl.focus(), 50);
+
+      let closed = false;
+      const close = value => {
+        if (closed) return;
+        closed = true;
+        document.removeEventListener("keydown", onKeydown);
+        overlay.remove();
+        resolve(value);
+      };
+      const onKeydown = e => {
+        if (e.key === "Enter") { e.preventDefault(); close(inputEl ? inputEl.value : true); }
+        if (e.key === "Escape") { e.preventDefault(); close(null); }
+      };
+      document.addEventListener("keydown", onKeydown);
+      overlay.querySelector("#pm-dialog-cancel").addEventListener("click", () => close(null));
+      overlay.querySelector("#pm-dialog-confirm").addEventListener("click", () => close(inputEl ? inputEl.value : true));
+      overlay.addEventListener("click", e => { if (e.target === overlay) close(null); });
+    });
+  }
+
+  async function customConfirm(message, { danger } = {}) {
+    return showPromptDialog({
+      title: "确认操作",
+      body: message.replace(/\n/g, "<br>"),
+      confirmText: "确定",
+      cancelText: "取消",
+      danger,
+    });
+  }
+
+  async function customPrompt(title, placeholder, defaultValue) {
+    return showPromptDialog({
+      title,
+      input: placeholder,
+      inputValue: defaultValue,
+      confirmText: "确定",
+      cancelText: "取消",
+    });
+  }
+
   // ── 右键时捕获 imageInfo ────────────────────────────────────────────────────
   let capturedImageInfo = null;
   let capturedAt = 0;
@@ -1711,6 +2117,1264 @@
 
   // ── 悬浮按钮 + 模态框 UI ──────────────────────────────
   // 说明：仅重写前端 UI 与交互状态，不改动图片扫描、合并、下载、ZIP 打包等核心逻辑。
+
+  // ── 提示词库：LibraryUI 核心逻辑 ────────────────────────────────────────────
+  const LibraryUI = {
+    _prompts: [],
+    _categories: [],
+    _searchKeyword: '',
+    _activeCategory: '全部',
+    _editingId: null,
+    _frequentOrder: [],
+    _catOrder: [],
+    _dragState: null,
+    _catDragActive: false,
+    _listDragActive: false,
+
+    async init() {
+      this._prompts = await StorageService.load();
+      this._frequentOrder = await StorageService.loadFrequentOrder();
+      this._catOrder = await StorageService.loadCategoryOrder();
+      this._categories = await StorageService.loadCategories();
+    },
+
+    _getCategoryList() {
+      const fromPrompts = new Set(this._prompts.map(p => p.category).filter(Boolean));
+      return [...new Set([...this._categories, ...fromPrompts])];
+    },
+
+    async _addCategory(name) {
+      name = name.trim();
+      if (!name) return;
+      if (this._categories.includes(name)) { showToast('该分类已存在'); return; }
+      this._categories.push(name);
+      await StorageService.saveCategories(this._categories);
+      this.renderCategories();
+    },
+
+    async _deleteCategory(name) {
+      const promptsInCat = this._prompts.filter(p => p.category === name);
+      const count = promptsInCat.length;
+      let msg;
+      if (count > 0) {
+        const titles = promptsInCat.slice(0, 5).map(p => `· ${escHtml(p.title)}`).join('<br>');
+        const more = count > 5 ? `<br>...及其他 ${count - 5} 条` : '';
+        msg = `确定删除分类「${escHtml(name)}」？<br><br>该分类下的 <b>${count}</b> 条提示词将一并删除：<br>${titles}${more}<br><br>此操作不可撤销。`;
+      } else {
+        msg = `确定删除分类「${escHtml(name)}」？`;
+      }
+      if (!await customConfirm(msg, { danger: true })) return;
+      this._prompts = this._prompts.filter(p => p.category !== name);
+      this._categories = this._categories.filter(c => c !== name);
+      await StorageService.save(this._prompts);
+      await StorageService.saveCategories(this._categories);
+      if (this._activeCategory === name) this._activeCategory = '全部';
+      this.renderCategories();
+      this.renderList();
+      showToast(`已删除分类「${name}」及 ${count} 条提示词`);
+    },
+
+    render() {
+      this.renderCategories();
+      this.renderList();
+    },
+
+    _getFrequentPrompts(limit = 10) {
+      const now = Date.now();
+      const scored = this._prompts
+        .filter(p => p.usageCount > 0 && p.lastUsedAt)
+        .map(p => {
+          const daysSinceUse = (now - new Date(p.lastUsedAt).getTime()) / 86400000;
+          const recencyScore = Math.max(0, 100 - daysSinceUse * 5);
+          const usageScore = Math.min(p.usageCount * 10, 100);
+          return { prompt: p, score: usageScore * 0.6 + recencyScore * 0.4 };
+        })
+        .sort((a, b) => b.score - a.score);
+      return scored.slice(0, limit).map(s => s.prompt);
+    },
+
+    renderCategories() {
+      if (this._catDragActive) return;
+      // 清理可能残留的分类拖拽 ghost
+      document.querySelectorAll('.pm-cat-lifted, .pm-cat-placeholder').forEach(el => el.remove());
+      const container = document.getElementById('pm-categories');
+      if (!container) return;
+      const fixedCats = ['常用', '全部'];
+      const allCats = this._getCategoryList();
+      const orderedCats = [];
+      for (const c of this._catOrder) {
+        if (allCats.includes(c) && !fixedCats.includes(c)) orderedCats.push(c);
+      }
+      for (const c of allCats) {
+        if (!fixedCats.includes(c) && !orderedCats.includes(c)) orderedCats.push(c);
+      }
+      const renderCat = (c, isDraggable) => {
+        const isActive = c === this._activeCategory;
+        const canDelete = !fixedCats.includes(c);
+        return `<span class="pm-cat-btn${isActive ? ' pm-active' : ''}${isDraggable ? ' pm-cat-draggable' : ''}" data-cat="${c}"><span class="pm-cat-label">${escHtml(c)}${canDelete ? '<button class="pm-cat-del" data-cat="' + c + '" title="删除分类">×</button>' : ''}</span></span>`;
+      };
+      let html = fixedCats.map(c => renderCat(c, false)).join('');
+      html += orderedCats.map(c => renderCat(c, true)).join('');
+      html += '<button class="pm-cat-add" id="pm-cat-add" title="新增分类">+ </button>';
+      container.innerHTML = html;
+      container.querySelectorAll('[data-cat]').forEach(btn => {
+        if (btn.classList.contains('pm-cat-del')) return;
+        btn.addEventListener('click', e => {
+          if (e.target.classList.contains('pm-cat-del')) return;
+          this._activeCategory = btn.dataset.cat;
+          this.renderCategories();
+          this.renderList();
+        });
+      });
+      container.querySelectorAll('.pm-cat-del').forEach(btn => {
+        btn.addEventListener('click', e => { e.stopPropagation(); this._deleteCategory(btn.dataset.cat); });
+      });
+      document.getElementById('pm-cat-add')?.addEventListener('click', async () => {
+        const name = await customPrompt('新增分类', '请输入分类名称');
+        if (name) this._addCategory(name);
+      });
+      this._bindCatDragEvents(container);
+    },
+
+    renderList() {
+      if (this._listDragActive) return;
+      // 清理可能残留的列表拖拽 ghost
+      document.querySelectorAll('.pm-lifted, .pm-drag-placeholder').forEach(el => el.remove());
+      const container = document.getElementById('pm-list');
+      if (!container) return;
+      let filtered;
+      if (this._activeCategory === '常用') {
+        filtered = this._getFrequentPrompts(10);
+        filtered = PromptService.search(this._searchKeyword, filtered);
+        if (this._frequentOrder.length > 0) {
+          const orderMap = new Map(this._frequentOrder.map((id, i) => [id, i]));
+          filtered.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999));
+        }
+      } else {
+        filtered = PromptService.filterByCategory(this._activeCategory, this._prompts);
+        filtered = PromptService.search(this._searchKeyword, filtered);
+        filtered.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+      }
+      if (filtered.length === 0) {
+        container.innerHTML = `<div class="pm-empty">${this._prompts.length === 0 ? '还没有提示词，点击下方按钮添加' : '没有匹配的提示词'}</div>`;
+        return;
+      }
+      const favs = filtered.filter(p => p.favorite);
+      const normals = filtered.filter(p => !p.favorite);
+      const renderItem = p => `
+        <div class="pm-item" data-id="${p.id}">
+          <div class="pm-item-inner">
+            <div class="pm-item-title">
+              ${p.favorite ? '<span class="pm-fav">★</span>' : ''}
+              <span>${escHtml(p.title)}</span>
+              <span class="pm-item-title-tags">${(p.tags || []).map(t => `<span class="pm-tag">${escHtml(t)}</span>`).join('')}</span>
+            </div>
+            <div class="pm-item-preview">${escHtml(p.content)}</div>
+            <div class="pm-item-meta">
+              ${(() => { const vars = parseTemplate(p.content); return vars.length > 0 ? `<div class="pm-item-tags">${vars.map(v => { const def = v.defaultVal; const label = def ? (def.length > 5 ? v.name + "='" + def.slice(0, 5) + "…'" : v.name + "='" + def + "'") : v.name; return `<span class="pm-tag pm-var-tag">{${escHtml(label)}}</span>`; }).join('')}</div>` : ''; })()}
+              <div class="pm-item-actions">
+                <button class="pm-btn-fill" data-id="${p.id}" title="追加到输入框"><span class="pm-btn-ico">⌨️</span><span class="pm-btn-label">只填</span></button>
+                <button class="pm-btn-fill-send" data-id="${p.id}" title="填入并发送"><span class="pm-btn-ico">📨</span><span class="pm-btn-label">填发</span></button>
+                <button class="pm-btn-fav" data-id="${p.id}" title="${p.favorite ? '取消收藏' : '收藏'}"><span class="pm-btn-ico">${p.favorite ? '⭐' : '☆'}</span><span class="pm-btn-label">收藏</span></button>
+                <button class="pm-btn-edit" data-id="${p.id}" title="编辑"><span class="pm-btn-ico">✏️</span><span class="pm-btn-label">编辑</span></button>
+                <button class="pm-btn-del" data-id="${p.id}" title="删除"><span class="pm-btn-ico">🗑️</span><span class="pm-btn-label">删除</span></button>
+              </div>
+            </div>
+          </div>
+        </div>`;
+      const favHtml = favs.map(renderItem).join('');
+      const dividerHtml = favs.length > 0 && normals.length > 0 ? '<div class="pm-fav-divider"><span>收藏</span></div>' : '';
+      const normalHtml = normals.map(renderItem).join('');
+      container.innerHTML = favHtml + dividerHtml + normalHtml;
+      container.querySelectorAll('.pm-btn-fill').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); this._fillPrompt(btn.dataset.id); }));
+      container.querySelectorAll('.pm-btn-fill-send').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); this._fillAndSendPrompt(btn.dataset.id); }));
+      container.querySelectorAll('.pm-btn-edit').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); this.showEditModal(btn.dataset.id); }));
+      container.querySelectorAll('.pm-btn-del').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); this._deletePrompt(btn.dataset.id); }));
+      container.querySelectorAll('.pm-btn-fav').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); this._toggleFavorite(btn.dataset.id); }));
+      this._bindDragEvents(container);
+    },
+
+    _bindDragEvents(container) {
+      if (container._pmDragCleanup) container._pmDragCleanup();
+      const self = this;
+      const MOVE_THRESHOLD = 6;
+      let drag = null;
+      let raf = 0;
+      let lastClientY = 0;
+      const clearFrame = () => { if (raf) cancelAnimationFrame(raf); raf = 0; };
+      const getListItems = () => [...container.querySelectorAll('.pm-item:not(.pm-lifted):not(.pm-drag-source)')];
+      const getDivider = () => container.querySelector('.pm-fav-divider');
+      const setGhostTransform = (dx, dy, ghost = drag?.ghost) => {
+        if (!ghost) return;
+        ghost.style.setProperty('--pm-drag-x', `${dx}px`);
+        ghost.style.setProperty('--pm-drag-y', `${dy}px`);
+        ghost.style.setProperty('--pm-drag-rotate', `${Math.max(-0.95, Math.min(0.95, dx / 155))}deg`);
+      };
+      const applyJiggleDelays = () => { getListItems().forEach((el, i) => el.style.setProperty('--pm-jiggle-delay', `${-(i % 5) * 84}ms`)); };
+      const animateLayoutShift = (mutate) => {
+        const items = getListItems();
+        const first = new Map(items.map(el => [el, el.getBoundingClientRect()]));
+        mutate();
+        const shifted = [];
+        for (const el of items) {
+          if (!el.isConnected) continue;
+          const before = first.get(el); const after = el.getBoundingClientRect();
+          const dx = before.left - after.left; const dy = before.top - after.top;
+          if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+          el.classList.add('pm-shifting'); el.style.transition = 'none'; el.style.transform = `translate3d(${dx}px,${dy}px,0)`; shifted.push(el);
+        }
+        if (!shifted.length) return;
+        requestAnimationFrame(() => {
+          shifted.forEach(el => { el.style.transition = 'transform .34s cubic-bezier(.16,1,.3,1)'; el.style.transform = ''; });
+          setTimeout(() => shifted.forEach(el => { el.classList.remove('pm-shifting'); el.style.transition = ''; el.style.transform = ''; }), 380);
+        });
+      };
+      const movePlaceholder = (clientY) => {
+        if (!drag?.placeholder) return;
+        const items = getListItems();
+        const beforeEl = items.find(el => { const r = el.getBoundingClientRect(); return clientY < r.top + r.height / 2; }) || null;
+        if (getDivider() && beforeEl === getDivider()) return;
+        const currentNext = drag.placeholder.nextElementSibling;
+        if (beforeEl === currentNext || (!beforeEl && drag.placeholder === container.lastElementChild)) return;
+        animateLayoutShift(() => { if (beforeEl) container.insertBefore(drag.placeholder, beforeEl); else container.appendChild(drag.placeholder); });
+      };
+      const autoScroll = (clientY) => {
+        const r = container.getBoundingClientRect(); const edge = 46;
+        if (clientY < r.top + edge) container.scrollTop -= Math.round((r.top + edge - clientY) / 4) + 4;
+        else if (clientY > r.bottom - edge) container.scrollTop += Math.round((clientY - (r.bottom - edge)) / 4) + 4;
+      };
+      const startDrag = (e) => {
+        const source = drag.item; const rect = source.getBoundingClientRect(); const cs = getComputedStyle(source);
+        const placeholder = document.createElement('div'); placeholder.className = 'pm-drag-placeholder';
+        placeholder.style.height = `${rect.height}px`; placeholder.style.marginBottom = cs.marginBottom;
+        source.parentNode.insertBefore(placeholder, source);
+        const ghost = source.cloneNode(true); ghost.classList.add('pm-lifted'); ghost.removeAttribute('id');
+        ghost.style.left = `${rect.left}px`; ghost.style.top = `${rect.top}px`; ghost.style.width = `${rect.width}px`; ghost.style.height = `${rect.height}px`;
+        ghost.style.transition = 'box-shadow .18s ease,border-color .18s ease,opacity .18s ease';
+        document.body.appendChild(ghost);
+        self._listDragActive = true;
+        source.classList.add('pm-drag-source');
+        drag.rect = rect; drag.ghost = ghost; drag.placeholder = placeholder; drag.started = true;
+        drag.offsetX = e.clientX - rect.left; drag.offsetY = e.clientY - rect.top; lastClientY = e.clientY;
+        setGhostTransform(0, 0); container.classList.add('pm-reordering'); applyJiggleDelays();
+      };
+      const onPointerDown = (e) => {
+        if (e.button !== undefined && e.button !== 0) return;
+        if (e.target.closest('button,input,textarea,select,a,[contenteditable="true"]')) return;
+        const item = e.target.closest('.pm-item');
+        if (!item || !container.contains(item)) return;
+        drag = { item, ghost: null, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, rect: item.getBoundingClientRect(), started: false, placeholder: null, offsetX: 0, offsetY: 0 };
+        item.addEventListener('lostpointercapture', () => finishDrag(true), { once: true });
+        item.setPointerCapture?.(e.pointerId);
+      };
+      const onPointerMove = (e) => {
+        if (!drag) return;
+        const dx = e.clientX - drag.startX; const dy = e.clientY - drag.startY; lastClientY = e.clientY;
+        if (!drag.started) { if (Math.hypot(dx, dy) < MOVE_THRESHOLD) return; startDrag(e); }
+        e.preventDefault(); clearFrame();
+        raf = requestAnimationFrame(() => { setGhostTransform(dx, dy); movePlaceholder(lastClientY); autoScroll(lastClientY); });
+      };
+      const waitForTransition = (el, propertyName, fallback = 240) => new Promise(resolve => {
+        let done = false; const finish = () => { if (done) return; done = true; el.removeEventListener('transitionend', onEnd); resolve(); };
+        const onEnd = (ev) => { if (ev.target === el && (!propertyName || ev.propertyName === propertyName)) finish(); };
+        el.addEventListener('transitionend', onEnd); setTimeout(finish, fallback);
+      });
+      const finishDrag = async (shouldSave = true) => {
+        if (!drag) return; clearFrame(); const state = drag; drag = null;
+        self._listDragActive = false;
+        const source = state.item;
+        try { source.releasePointerCapture?.(state.pointerId); } catch (e) {}
+        if (!state.started) return;
+        const ghost = state.ghost; const placeholder = state.placeholder;
+        const removeGhost = () => { try { if (ghost && ghost.parentNode) ghost.remove(); } catch (e) {} };
+        const removePlaceholder = () => { try { if (placeholder && placeholder.parentNode) placeholder.remove(); } catch (e) {} };
+        try {
+          const targetRect = placeholder.getBoundingClientRect();
+          ghost.style.transition = 'transform .19s cubic-bezier(.2,.9,.2,1),box-shadow .19s ease,opacity .16s ease';
+          setGhostTransform(targetRect.left - state.rect.left, targetRect.top - state.rect.top, ghost);
+          await waitForTransition(ghost, 'transform', 230);
+          if (placeholder.parentNode) {
+            const firstRects = new Map(getListItems().map(el => [el, el.getBoundingClientRect()]));
+            placeholder.parentNode.insertBefore(source, placeholder);
+            source.classList.remove('pm-drag-source'); source.classList.add('pm-drop-pop');
+            removePlaceholder();
+            requestAnimationFrame(() => {
+              for (const [el, before] of firstRects) {
+                if (!el.isConnected || el === source) continue;
+                const after = el.getBoundingClientRect();
+                if (Math.abs(before.left - after.left) < .5 && Math.abs(before.top - after.top) < .5) continue;
+                el.style.transition = 'none'; el.style.transform = `translate3d(${before.left - after.left}px,${before.top - after.top}px,0)`;
+                requestAnimationFrame(() => { el.style.transition = 'transform .28s cubic-bezier(.16,1,.3,1)'; el.style.transform = ''; });
+              }
+              requestAnimationFrame(removeGhost);
+            });
+            setTimeout(() => { source.classList.remove('pm-drop-pop'); }, 360);
+          } else {
+            source.classList.remove('pm-drag-source');
+            removeGhost(); removePlaceholder();
+          }
+        } catch (e) { removeGhost(); removePlaceholder(); }
+        try { container.classList.remove('pm-reordering'); } catch (e) {}
+        getListItems().forEach(el => {
+          el.style.removeProperty('--pm-jiggle-delay');
+          el.style.transform = '';
+          el.style.transition = '';
+          el.classList.remove('pm-shifting');
+        });
+        if (shouldSave) {
+          try {
+            const newOrder = [...document.querySelectorAll('#pm-list .pm-item')].map(el => el.dataset.id);
+            const draggedId = source.dataset.id;
+            const saveOrder = () => self._saveNewOrder(newOrder, draggedId, container).catch(e => console.log('[无水印] 保存排序失败:', e));
+            if (window.requestIdleCallback) window.requestIdleCallback(saveOrder, { timeout: 1000 }); else setTimeout(saveOrder, 260);
+          } catch (e) {}
+        }
+      };
+      container.addEventListener('pointerdown', onPointerDown);
+      window.addEventListener('pointermove', onPointerMove, { passive: false });
+      window.addEventListener('pointercancel', () => finishDrag(false));
+      container._pmDragCleanup = () => {
+        clearFrame(); if (drag?.ghost) drag.ghost.remove(); if (drag?.placeholder) drag.placeholder.remove();
+        if (drag?.item) drag.item.classList.remove('pm-drag-source'); drag = null;
+        container.classList.remove('pm-reordering');
+        getListItems().forEach(el => { el.style.removeProperty('--pm-jiggle-delay'); el.style.transform = ''; el.style.transition = ''; el.classList.remove('pm-shifting'); });
+        container.removeEventListener('pointerdown', onPointerDown);
+        window.removeEventListener('pointermove', onPointerMove);
+      };
+    },
+
+    _bindCatDragEvents(container) {
+      if (container._pmCatDragCleanup) container._pmCatDragCleanup();
+      const self = this;
+      const MOVE_THRESHOLD = 6; let drag = null; let raf = 0; let suppressClick = false;
+      const clearFrame = () => { if (raf) cancelAnimationFrame(raf); raf = 0; };
+      const getDraggableItems = () => [...container.querySelectorAll('.pm-cat-btn.pm-cat-draggable:not(.pm-cat-lifted):not(.pm-cat-source)')];
+      const setGhostTransform = (dx, dy, ghost = drag?.ghost) => {
+        if (!ghost) return;
+        ghost.style.setProperty('--pm-cat-dx', `${dx}px`);
+        ghost.style.setProperty('--pm-cat-dy', `${dy}px`);
+        ghost.style.setProperty('--pm-cat-rotate', `${Math.max(-0.8, Math.min(0.8, dx / 180))}deg`);
+      };
+      const applyJiggleDelays = () => {
+        getDraggableItems().forEach((el, i) => {
+          el.style.setProperty('--pm-cat-jiggle-delay', `${-(i % 5) * 84}ms`);
+        });
+      };
+      const animateLayoutShift = (mutate) => {
+        const items = getDraggableItems(); const first = new Map(items.map(el => [el, el.getBoundingClientRect()])); mutate();
+        const shifted = [];
+        for (const el of items) {
+          if (!el.isConnected) continue;
+          const before = first.get(el); const after = el.getBoundingClientRect();
+          if (Math.abs(before.left - after.left) < 0.5 && Math.abs(before.top - after.top) < 0.5) continue;
+          el.classList.add('pm-cat-shifting'); el.style.transition = 'none'; el.style.transform = `translate3d(${before.left - after.left}px,${before.top - after.top}px,0)`; shifted.push(el);
+        }
+        if (!shifted.length) return;
+        requestAnimationFrame(() => { shifted.forEach(el => { el.style.transition = 'transform .34s cubic-bezier(.16,1,.3,1)'; el.style.transform = ''; }); setTimeout(() => shifted.forEach(el => { el.classList.remove('pm-cat-shifting'); el.style.transition = ''; el.style.transform = ''; }), 380); });
+      };
+      const movePlaceholder = (clientX, clientY) => {
+        if (!drag?.placeholder) return;
+        const items = getDraggableItems();
+        const beforeEl = items.find(el => { const r = el.getBoundingClientRect(); return (clientY >= r.top - 4 && clientY <= r.bottom + 4 && clientX < r.left + r.width / 2) || clientY < r.top + r.height / 2; }) || null;
+        const addButton = container.querySelector('.pm-cat-add');
+        if (beforeEl === drag.placeholder.nextElementSibling || (!beforeEl && drag.placeholder.nextElementSibling === addButton)) return;
+        animateLayoutShift(() => { if (beforeEl) container.insertBefore(drag.placeholder, beforeEl); else container.insertBefore(drag.placeholder, addButton); });
+      };
+      const startDrag = (e) => {
+        const source = drag.item; const rect = source.getBoundingClientRect();
+        const placeholder = document.createElement('span'); placeholder.className = 'pm-cat-placeholder';
+        placeholder.style.width = `${rect.width}px`; placeholder.style.height = `${rect.height}px`;
+        source.parentNode.insertBefore(placeholder, source);
+        const ghost = source.cloneNode(true); ghost.classList.add('pm-cat-lifted'); ghost.removeAttribute('id');
+        ghost.style.left = `${rect.left}px`; ghost.style.top = `${rect.top}px`; ghost.style.width = `${rect.width}px`; ghost.style.height = `${rect.height}px`;
+        ghost.style.transition = 'box-shadow .18s ease,border-color .18s ease'; document.body.appendChild(ghost);
+        self._catDragActive = true;
+        source.classList.add('pm-cat-source');
+        drag.rect = rect; drag.ghost = ghost; drag.placeholder = placeholder; drag.started = true; suppressClick = true;
+        drag.offsetX = e.clientX - rect.left; drag.offsetY = e.clientY - rect.top;
+        setGhostTransform(0, 0); container.classList.add('pm-cat-reordering'); applyJiggleDelays();
+      };
+      const onPointerDown = (e) => {
+        if (e.button !== undefined && e.button !== 0) return;
+        if (e.target.closest('button,input,textarea,select')) return;
+        const item = e.target.closest('.pm-cat-btn.pm-cat-draggable');
+        if (!item || !container.contains(item)) return;
+        drag = { item, ghost: null, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, rect: item.getBoundingClientRect(), started: false, placeholder: null, offsetX: 0, offsetY: 0 };
+        item.setPointerCapture?.(e.pointerId);
+      };
+      const onPointerMove = (e) => {
+        if (!drag) return;
+        const dx = e.clientX - drag.startX; const dy = e.clientY - drag.startY;
+        if (!drag.started) { if (Math.hypot(dx, dy) < MOVE_THRESHOLD) return; startDrag(e); }
+        e.preventDefault(); clearFrame(); raf = requestAnimationFrame(() => { setGhostTransform(dx, dy); movePlaceholder(e.clientX, e.clientY); });
+      };
+      const finishDrag = async (shouldSave = true) => {
+        if (!drag) return; clearFrame(); const state = drag; drag = null;
+        self._catDragActive = false;
+        const source = state.item;
+        try { source.releasePointerCapture?.(state.pointerId); } catch (e) {}
+        if (!state.started) {
+          if (state.placeholder && state.placeholder.parentNode) state.placeholder.remove();
+          if (state.ghost && state.ghost.parentNode) state.ghost.remove();
+          return;
+        }
+        const ghost = state.ghost; const placeholder = state.placeholder;
+        try {
+          // 1. ghost 飞到 placeholder 位置
+          const phRect = placeholder.getBoundingClientRect();
+          ghost.style.transition = 'transform .19s cubic-bezier(.2,.9,.2,1), box-shadow .19s ease, opacity .16s ease';
+          ghost.style.transform = `translate3d(${phRect.left - state.rect.left}px, ${phRect.top - state.rect.top}px, 0) scale(1.05)`;
+          await new Promise(r => setTimeout(r, 200));
+          // 2. 记录当前位置用于 FLIP 动画
+          const firstRects = new Map(getDraggableItems().filter(el => el !== source).map(el => [el, el.getBoundingClientRect()]));
+          // 3. source 插入到 placeholder 位置
+          if (placeholder.parentNode) {
+            placeholder.parentNode.insertBefore(source, placeholder);
+            source.classList.remove('pm-cat-source');
+            source.classList.add('pm-cat-drop-pop');
+          }
+          placeholder.remove();
+          ghost.remove();
+          // 4. FLIP 动画：其他元素平滑过渡到新位置
+          requestAnimationFrame(() => {
+            for (const [el, before] of firstRects) {
+              if (!el.isConnected) continue;
+              const after = el.getBoundingClientRect();
+              const dx = before.left - after.left;
+              const dy = before.top - after.top;
+              if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+              el.style.transition = 'none';
+              el.style.transform = `translate3d(${dx}px,${dy}px,0)`;
+              requestAnimationFrame(() => {
+                el.style.transition = 'transform .28s cubic-bezier(.16,1,.3,1)';
+                el.style.transform = '';
+              });
+            }
+          });
+          setTimeout(() => { source.classList.remove('pm-cat-drop-pop'); }, 360);
+        } catch (e) {
+          if (ghost && ghost.parentNode) ghost.remove();
+          if (placeholder && placeholder.parentNode) placeholder.remove();
+          source.classList.remove('pm-cat-source');
+        }
+        try { container.classList.remove('pm-cat-reordering'); } catch (e) {}
+        getDraggableItems().forEach(el => {
+          el.style.removeProperty('--pm-cat-jiggle-delay');
+          el.style.transform = '';
+          el.style.transition = '';
+          el.classList.remove('pm-cat-shifting');
+        });
+        // 保存新顺序
+        if (shouldSave) {
+          const items = [...container.querySelectorAll('.pm-cat-btn.pm-cat-draggable:not(.pm-cat-lifted):not(.pm-cat-source)')];
+          const newOrder = items.map(el => el.dataset.cat);
+          self._catOrder = newOrder;
+          await StorageService.saveCategoryOrder(newOrder);
+        }
+        setTimeout(() => { suppressClick = false; }, 0);
+      };
+      const onPointerUp = () => finishDrag(true);
+      const onPointerCancel = () => finishDrag(false);
+      const onClickCapture = (e) => {
+        if (!suppressClick) return;
+        suppressClick = false;
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      container.addEventListener('pointerdown', onPointerDown);
+      container.addEventListener('click', onClickCapture, true);
+      window.addEventListener('pointermove', onPointerMove, { passive: false });
+      window.addEventListener('pointerup', onPointerUp);
+      window.addEventListener('pointercancel', onPointerCancel);
+      container._pmCatDragCleanup = () => {
+        clearFrame(); if (drag?.ghost) drag.ghost.remove(); if (drag?.placeholder) drag.placeholder.remove();
+        if (drag?.item) drag.item.classList.remove('pm-cat-source'); drag = null; suppressClick = false;
+        container.classList.remove('pm-cat-reordering');
+        getDraggableItems().forEach(el => { el.style.removeProperty('--pm-cat-jiggle-delay'); el.style.transform = ''; el.style.transition = ''; el.classList.remove('pm-cat-shifting'); });
+        container.removeEventListener('pointerdown', onPointerDown);
+        container.removeEventListener('click', onClickCapture, true);
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', onPointerUp);
+        window.removeEventListener('pointercancel', onPointerCancel);
+      };
+    },
+
+    async _saveNewOrder(newOrder, draggedId, container) {
+      if (this._activeCategory === '常用') { this._frequentOrder = newOrder; await StorageService.saveFrequentOrder(newOrder); this.renderList(); return; }
+      const draggedPrompt = this._prompts.find(p => p.id === draggedId);
+      const crossedZone = draggedPrompt && (() => {
+        const domIdx = newOrder.indexOf(draggedId);
+        const favCount = newOrder.filter(id => this._prompts.find(pp => pp.id === id)?.favorite).length;
+        return (draggedPrompt.favorite && domIdx >= favCount) || (!draggedPrompt.favorite && domIdx < favCount);
+      })();
+      let oldRect = null;
+      if (crossedZone && container) { const el = container.querySelector(`[data-id="${draggedId}"]`); if (el) oldRect = el.getBoundingClientRect(); }
+      const favIds = []; const normalIds = [];
+      for (const id of newOrder) { const p = this._prompts.find(p => p.id === id); if (!p) continue; if (p.favorite) favIds.push(id); else normalIds.push(id); }
+      favIds.forEach((id, i) => { const p = this._prompts.find(p => p.id === id); if (p) p.sortOrder = i; });
+      normalIds.forEach((id, i) => { const p = this._prompts.find(p => p.id === id); if (p) p.sortOrder = i + 10000; });
+      await StorageService.save(this._prompts); this.renderList();
+      if (crossedZone && oldRect && container) {
+        const newEl = container.querySelector(`[data-id="${draggedId}"]`);
+        if (newEl) {
+          const newRect = newEl.getBoundingClientRect(); const dx = oldRect.left - newRect.left; const dy = oldRect.top - newRect.top;
+          if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+            newEl.style.transition = 'none'; newEl.style.transform = `translate3d(${dx}px,${dy}px,0)`; newEl.style.zIndex = '10';
+            requestAnimationFrame(() => { newEl.style.transition = 'transform .4s cubic-bezier(.16,1,.3,1)'; newEl.style.transform = ''; setTimeout(() => { newEl.style.transition = ''; newEl.style.transform = ''; newEl.style.zIndex = ''; }, 450); });
+          }
+        }
+      }
+    },
+
+    async _fillPrompt(id) {
+      const prompt = this._prompts.find(p => p.id === id); if (!prompt) return;
+      let content = prompt.content; let replaced = false;
+      const vars = parseTemplate(content);
+      if (vars.length > 0) {
+        const args = readArgsFromEditor();
+        if (args) {
+          const result = resolveArgs(vars, args.tokens);
+          if (result.errors.length > 0) { showToast(result.errors[0]); return; }
+          content = fillTemplate(content, vars, result); replaced = true; SiteAdapter.clearInput();
+        } else { content = fillTemplate(content, vars, { values: {}, skipped: new Set(), errors: [] }); }
+      }
+      const success = SiteAdapter.insertText(content, replaced ? 'replace' : 'append');
+      if (success) {
+        prompt.usageCount = (prompt.usageCount || 0) + 1; prompt.lastUsedAt = new Date().toISOString();
+        await StorageService.save(this._prompts); this.renderList();
+        showToast(replaced ? '已替换变量并填入输入框' : '已追加到输入框');
+      } else { showToast('未找到输入框，请点击豆包输入区域后再试'); }
+    },
+
+    async _fillAndSendPrompt(id) {
+      const prompt = this._prompts.find(p => p.id === id); if (!prompt) return;
+      let content = prompt.content;
+      const vars = parseTemplate(content);
+      if (vars.length > 0) {
+        const args = readArgsFromEditor();
+        if (args) {
+          const result = resolveArgs(vars, args.tokens);
+          if (result.errors.length > 0) { showToast(result.errors[0]); return; }
+          content = fillTemplate(content, vars, result); SiteAdapter.clearInput();
+        } else { content = fillTemplate(content, vars, { values: {}, skipped: new Set(), errors: [] }); }
+      }
+      const success = SiteAdapter.insertText(content, 'replace');
+      if (!success) { showToast('未找到输入框，请点击豆包输入区域后再试'); return; }
+      prompt.usageCount = (prompt.usageCount || 0) + 1; prompt.lastUsedAt = new Date().toISOString();
+      await StorageService.save(this._prompts); this.renderList();
+      showToast('已填入，等待发送...');
+      for (let i = 0; i < 225; i++) {
+        await new Promise(r => setTimeout(r, 200));
+        const sendBtn = SiteAdapter.findSendButton();
+        if (sendBtn && !sendBtn.disabled) { sendBtn.click(); return; }
+      }
+      showToast('发送按钮未就绪，请手动点击发送');
+    },
+
+    async _deletePrompt(id) {
+      const prompt = this._prompts.find(p => p.id === id); if (!prompt) return;
+      if (!await customConfirm(`确定删除「${escHtml(prompt.title)}」？`, { danger: true })) return;
+      this._prompts = this._prompts.filter(p => p.id !== id);
+      await StorageService.save(this._prompts); this.renderList(); this.renderCategories(); showToast('已删除');
+    },
+
+    async _toggleFavorite(id) {
+      const prompt = this._prompts.find(p => p.id === id); if (!prompt) return;
+      prompt.favorite = !prompt.favorite;
+      await StorageService.save(this._prompts); this.renderList();
+    },
+
+    async _handleImport(e) {
+      const file = e.target.files[0]; if (!file) return; e.target.value = '';
+      try {
+        const imported = await StorageService.importJSON(file);
+        const existingMap = new Map(this._prompts.map(p => [p.id, p]));
+        const toAdd = []; const conflicts = [];
+        for (const imp of imported) {
+          const local = existingMap.get(imp.id);
+          if (!local) { toAdd.push(imp); } else { if (local.content === imp.content && local.updatedAt === imp.updatedAt) continue; conflicts.push({ local, imported: imp }); }
+        }
+        if (conflicts.length === 0) { this._prompts.push(...toAdd); await StorageService.save(this._prompts); this.renderList(); showToast(`已导入 ${toAdd.length} 条提示词`); return; }
+        this._showImportConflictDialog(toAdd, conflicts);
+      } catch (err) { showToast('导入失败：' + err.message); }
+    },
+
+    _showImportConflictDialog(toAdd, conflicts) {
+      const overlay = document.createElement('div'); overlay.className = 'pm-modal-overlay';
+      const resolutions = new Map(); let mode = null;
+      const renderConflictList = () => {
+        const listEl = overlay.querySelector('#pm-conflict-list'); if (!listEl) return;
+        listEl.innerHTML = conflicts.map((c, i) => {
+          const localTime = new Date(c.local.updatedAt).toLocaleString('zh-CN');
+          const importTime = new Date(c.imported.updatedAt).toLocaleString('zh-CN');
+          const localNewer = new Date(c.local.updatedAt) >= new Date(c.imported.updatedAt);
+          const current = resolutions.get(c.imported.id);
+          return `<div class="pm-conflict-item" data-idx="${i}">
+            <div class="pm-conflict-title">${escHtml(c.imported.title || c.local.title)}</div>
+            <div class="pm-conflict-compare">
+              <div class="pm-conflict-side"><div class="pm-conflict-side-header"><span>本地</span><span class="${localNewer ? 'pm-conflict-newer' : ''}">${localTime}</span></div><div class="pm-conflict-side-content">${escHtml(c.local.content)}</div></div>
+              <div class="pm-conflict-side"><div class="pm-conflict-side-header"><span>导入</span><span class="${!localNewer ? 'pm-conflict-newer' : ''}">${importTime}</span></div><div class="pm-conflict-side-content">${escHtml(c.imported.content)}</div></div>
+            </div>
+            <div class="pm-conflict-actions">
+              <button class="pm-conflict-btn${current === 'skip' ? ' pm-conflict-active' : ''}" data-idx="${i}" data-action="skip">保留本地</button>
+              <button class="pm-conflict-btn${current === 'replace' ? ' pm-conflict-active' : ''}" data-idx="${i}" data-action="replace">使用导入</button>
+            </div></div>`;
+        }).join('');
+        listEl.querySelectorAll('.pm-conflict-btn').forEach(btn => {
+          btn.addEventListener('click', () => { resolutions.set(conflicts[parseInt(btn.dataset.idx)].imported.id, btn.dataset.action); renderConflictList(); });
+        });
+      };
+      overlay.innerHTML = `<div class="pm-modal pm-conflict-modal">
+        <h4>导入冲突（${conflicts.length} 条）</h4>
+        <div class="pm-conflict-desc">以下提示词 ID 相同但内容不同，请选择处理方式：</div>
+        <div class="pm-conflict-global"><button class="pm-conflict-global-btn" data-mode="replace">全部替换</button><button class="pm-conflict-global-btn" data-mode="newest">按时间最新</button><button class="pm-conflict-global-btn" data-mode="skip">全部跳过</button></div>
+        <div class="pm-conflict-list" id="pm-conflict-list"></div>
+        <div class="pm-modal-btns"><button class="pm-btn-cancel" id="pm-conflict-cancel">取消</button><button class="pm-btn-save" id="pm-conflict-confirm">确认导入</button></div>
+      </div>`;
+      document.body.appendChild(overlay); renderConflictList();
+      overlay.querySelectorAll('.pm-conflict-global-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          mode = btn.dataset.mode;
+          overlay.querySelectorAll('.pm-conflict-global-btn').forEach(b => b.classList.remove('pm-conflict-active')); btn.classList.add('pm-conflict-active');
+          if (mode === 'replace') conflicts.forEach(c => resolutions.set(c.imported.id, 'replace'));
+          else if (mode === 'skip') conflicts.forEach(c => resolutions.set(c.imported.id, 'skip'));
+          else if (mode === 'newest') conflicts.forEach(c => resolutions.set(c.imported.id, new Date(c.imported.updatedAt) > new Date(c.local.updatedAt) ? 'replace' : 'skip'));
+          renderConflictList();
+        });
+      });
+      overlay.querySelector('#pm-conflict-cancel').addEventListener('click', () => overlay.remove());
+      overlay.querySelector('#pm-conflict-confirm').addEventListener('click', async () => {
+        if (!mode) { showToast('请先选择处理方式'); return; }
+        for (const [id, action] of resolutions) { if (action === 'replace') { const imp = conflicts.find(c => c.imported.id === id)?.imported; if (imp) { const idx = this._prompts.findIndex(p => p.id === id); if (idx !== -1) this._prompts[idx] = imp; } } }
+        this._prompts.push(...toAdd); await StorageService.save(this._prompts); overlay.remove(); this.renderList();
+        showToast(`已导入 ${toAdd.length} 条新增，${[...resolutions.values()].filter(a => a === 'replace').length} 条替换`);
+      });
+      overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    },
+
+    showEditModal(id, prefill) {
+      this._editingId = id || null;
+      const prompt = id ? this._prompts.find(p => p.id === id) : null;
+      const defaultCategory = (this._activeCategory !== '全部' && this._activeCategory !== '常用') ? this._activeCategory : '通用模板';
+      const data = prompt || prefill || { category: defaultCategory };
+      const modalCategories = [...new Set([...this._getCategoryList(), data.category || defaultCategory].filter(Boolean))];
+      const selectedCategory = modalCategories.includes(data.category) ? data.category : (modalCategories[0] || defaultCategory);
+      const overlay = document.createElement('div'); overlay.className = 'pm-modal-overlay';
+      overlay.innerHTML = `<div class="pm-modal">
+        <h4>${prompt ? '编辑提示词' : '新增提示词'}</h4>
+        <label>标题</label><input id="pm-edit-title" type="text" value="${escAttr(data.title || '')}" placeholder="给提示词起个名字" />
+        <label>内容</label><textarea id="pm-edit-content" placeholder="输入提示词内容...">${escHtml(data.content || '')}</textarea>
+        <div class="pm-help-text">使用 {变量名} 定义占位符，{变量名='默认值'} 设置默认值。传参格式：'参数1|参数2' 或 "参数1|参数2"，空位跳过</div>
+        <label>分类</label>
+        <select id="pm-edit-category" class="pm-select-native" aria-hidden="true" tabindex="-1">
+          ${modalCategories.map(c => `<option value="${escAttr(c)}"${selectedCategory === c ? ' selected' : ''}>${escHtml(c)}</option>`).join('')}
+        </select>
+        <div class="pm-select" data-for="pm-edit-category">
+          <button type="button" class="pm-select-trigger" aria-haspopup="listbox" aria-expanded="false">
+            <span class="pm-select-value">${escHtml(selectedCategory)}</span>
+            <span class="pm-select-arrow" aria-hidden="true">⌄</span>
+          </button>
+          <div class="pm-select-menu" role="listbox" tabindex="-1">
+            ${modalCategories.map(c => `
+              <button type="button" class="pm-select-option${selectedCategory === c ? ' pm-selected' : ''}" role="option" aria-selected="${selectedCategory === c ? 'true' : 'false'}" data-value="${escAttr(c)}">
+                <span>${escHtml(c)}</span><span class="pm-select-check" aria-hidden="true">✓</span>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+        <label>标签（逗号分隔）</label><input id="pm-edit-tags" type="text" value="${(data.tags || []).join(', ')}" placeholder="标签1, 标签2" />
+        <div class="pm-modal-btns"><button class="pm-btn-cancel" id="pm-edit-cancel">取消</button><button class="pm-btn-save" id="pm-edit-save">保存</button></div>
+      </div>`;
+      document.body.appendChild(overlay);
+      setTimeout(() => document.getElementById('pm-edit-title')?.focus(), 50);
+      this._bindCategorySelect(overlay);
+      overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+      document.getElementById('pm-edit-cancel').addEventListener('click', () => overlay.remove());
+      document.getElementById('pm-edit-save').addEventListener('click', async () => { await this._savePrompt(overlay); });
+      overlay.addEventListener('keydown', e => { if (e.ctrlKey && e.key === 'Enter') this._savePrompt(overlay); });
+    },
+
+    _bindCategorySelect(overlay) {
+      const select = overlay.querySelector('#pm-edit-category');
+      const wrap = overlay.querySelector('.pm-select[data-for="pm-edit-category"]');
+      if (!select || !wrap) return;
+
+      const trigger = wrap.querySelector('.pm-select-trigger');
+      const valueText = wrap.querySelector('.pm-select-value');
+      const options = [...wrap.querySelectorAll('.pm-select-option')];
+
+      const close = () => {
+        wrap.classList.remove('pm-open');
+        trigger.setAttribute('aria-expanded', 'false');
+      };
+      const open = () => {
+        wrap.classList.add('pm-open');
+        trigger.setAttribute('aria-expanded', 'true');
+      };
+      const setValue = value => {
+        select.value = value;
+        valueText.textContent = value;
+        options.forEach(btn => {
+          const selected = btn.dataset.value === value;
+          btn.classList.toggle('pm-selected', selected);
+          btn.setAttribute('aria-selected', selected ? 'true' : 'false');
+        });
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      const focusOption = offset => {
+        const current = Math.max(0, options.findIndex(btn => btn.dataset.value === select.value));
+        const next = options[(current + offset + options.length) % options.length];
+        next?.focus();
+      };
+
+      trigger.addEventListener('click', e => {
+        e.stopPropagation();
+        wrap.classList.contains('pm-open') ? close() : open();
+      });
+      trigger.addEventListener('keydown', e => {
+        if (e.key === 'ArrowDown') { e.preventDefault(); open(); focusOption(0); }
+        if (e.key === 'ArrowUp') { e.preventDefault(); open(); focusOption(-1); }
+        if (e.key === 'Escape') close();
+      });
+      options.forEach(btn => {
+        btn.addEventListener('click', e => {
+          e.stopPropagation();
+          setValue(btn.dataset.value);
+          close();
+          trigger.focus();
+        });
+        btn.addEventListener('keydown', e => {
+          const idx = options.indexOf(btn);
+          if (e.key === 'ArrowDown') { e.preventDefault(); options[(idx + 1) % options.length]?.focus(); }
+          if (e.key === 'ArrowUp') { e.preventDefault(); options[(idx - 1 + options.length) % options.length]?.focus(); }
+          if (e.key === 'Home') { e.preventDefault(); options[0]?.focus(); }
+          if (e.key === 'End') { e.preventDefault(); options[options.length - 1]?.focus(); }
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setValue(btn.dataset.value);
+            close();
+            trigger.focus();
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            close();
+            trigger.focus();
+          }
+        });
+      });
+      overlay.addEventListener('click', e => { if (!wrap.contains(e.target)) close(); });
+    },
+
+    async _savePrompt(overlay) {
+      const title = document.getElementById('pm-edit-title').value.trim();
+      const content = document.getElementById('pm-edit-content').value.trim();
+      const category = document.getElementById('pm-edit-category').value;
+      const tagsStr = document.getElementById('pm-edit-tags').value.trim();
+      const tags = tagsStr ? tagsStr.split(/[,，]/).map(t => t.trim()).filter(Boolean) : [];
+      if (!title) { showToast('请输入标题'); return; }
+      if (!content) { showToast('请输入提示词内容'); return; }
+      if (this._editingId) {
+        const idx = this._prompts.findIndex(p => p.id === this._editingId);
+        if (idx !== -1) this._prompts[idx] = PromptService.update(this._prompts[idx], { title, content, category, tags });
+      } else {
+        this._prompts.filter(p => !p.favorite).forEach(p => { p.sortOrder = (p.sortOrder || 10000) + 1; });
+        this._prompts.push(PromptService.create({ title, content, category, tags, sortOrder: 10000 }));
+      }
+      await StorageService.save(this._prompts); overlay.remove(); this.renderList(); this.renderCategories();
+      showToast(this._editingId ? '已更新' : '已添加');
+    },
+  };
+
+  // ── 提示词库：独立悬浮按钮和面板 ──────────────────────────────────────────
+  const PROMPT_BUTTON_HOST_ID = "doubao-prompt-button-host";
+  const PROMPT_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/><path d="M8 7h6"/><path d="M8 11h8"/></g></svg>`;
+
+  let promptBtnElement = null;
+  let promptModalElement = null;
+
+  function createPromptFloatingButton() {
+    if (document.getElementById(PROMPT_BUTTON_HOST_ID)) return;
+    const wrapper = document.createElement("div");
+    wrapper.id = PROMPT_BUTTON_HOST_ID;
+    const style = document.createElement("style");
+    style.textContent = `
+      #${PROMPT_BUTTON_HOST_ID} {
+        --prompt-accent: #4f7cff;
+        --prompt-accent-2: #78d7ff;
+        --prompt-ink: #1f2937;
+        --prompt-border: rgba(229,231,235,0.92);
+        --prompt-glass: rgba(255,255,255,0.92);
+        position: fixed;
+        right: 24px;
+        bottom: 92px;
+        z-index: 2147483646;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      #doubao-prompt-btn {
+        position: relative;
+        width: 54px;
+        height: 54px;
+        border: 1px solid var(--prompt-border);
+        border-radius: 18px;
+        color: var(--prompt-ink);
+        background:
+          radial-gradient(circle at 28% 18%, rgba(79,124,255,0.18), transparent 28%),
+          var(--prompt-glass);
+        box-shadow: 0 16px 38px rgba(15,23,42,0.14);
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 23px;
+        cursor: pointer;
+        outline: none;
+        overflow: visible;
+        transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease, color .18s ease, background .18s ease;
+      }
+      #doubao-prompt-btn:hover {
+        transform: translateY(-2px) scale(1.02);
+        color: var(--prompt-accent);
+        border-color: rgba(79,124,255,0.42);
+        box-shadow: 0 22px 46px rgba(79,124,255,0.20), 0 12px 28px rgba(15,23,42,0.12);
+      }
+      #doubao-prompt-btn:active { transform: translateY(0) scale(.98); }
+    `;
+    wrapper.appendChild(style);
+    const btn = document.createElement("button");
+    btn.id = "doubao-prompt-btn";
+    btn.type = "button";
+    btn.innerHTML = PROMPT_ICON_SVG;
+    btn.title = "提示词库";
+    btn.setAttribute("aria-label", "提示词库");
+    btn.addEventListener("click", () => {
+      if (promptModalElement && promptModalElement.classList.contains("show")) { closePromptModal(); }
+      else { openPromptModal(); }
+    });
+    wrapper.appendChild(btn);
+    document.body.appendChild(wrapper);
+    promptBtnElement = wrapper;
+  }
+
+  function openPromptModal() {
+    if (modalElement && modalElement.classList.contains("show")) {
+      modalElement.classList.remove("show");
+      document.documentElement.classList.remove("doubao-nomark-modal-open");
+    }
+    if (!promptModalElement) createPromptModal();
+    promptModalElement.classList.add("show");
+    document.documentElement.classList.add("doubao-nomark-modal-open");
+    LibraryUI.render();
+  }
+
+  function closePromptModal() {
+    if (promptModalElement) promptModalElement.classList.remove("show");
+    document.documentElement.classList.remove("doubao-nomark-modal-open");
+  }
+
+  function createPromptModal() {
+    if (document.getElementById("doubao-prompt-modal")) return;
+    const modal = document.createElement("div");
+    modal.id = "doubao-prompt-modal";
+    const style = document.createElement("style");
+    style.textContent = `
+      #doubao-prompt-modal {
+        --nomark-accent: #ff6060;
+        --nomark-accent-2: #ff9a9a;
+        --nomark-accent-soft: #fff1f1;
+        --nomark-ink: #1f2937;
+        --nomark-muted: #6b7280;
+        --nomark-soft: #f6f7f9;
+        --nomark-border: rgba(229, 231, 235, 0.92);
+        --nomark-card: rgba(255, 255, 255, 0.96);
+        position: fixed; top: 0; right: 0; width: 430px; height: 100vh;
+        z-index: 2147483645; transform: translateX(100%);
+        transition: transform .24s cubic-bezier(.2,.8,.2,1);
+        background: var(--nomark-card);
+        border-left: 1px solid var(--nomark-border);
+        display: flex; flex-direction: column; overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+        font-size: 14px; color: var(--nomark-ink);
+        box-shadow: -4px 0 24px rgba(0,0,0,0.08);
+      }
+      #doubao-prompt-modal.show { transform: translateX(0); }
+      .pm-topbar {
+        display: flex; align-items: center; gap: 8px;
+        padding: 12px 14px; border-bottom: 1px solid var(--nomark-border);
+        flex-shrink: 0; background: var(--nomark-card);
+      }
+      .pm-topbar h3 { margin: 0; font-size: 15px; font-weight: 600; flex-shrink: 0; }
+      .pm-topbar-spacer { flex: 1; }
+      .pm-topbar-btn {
+        min-height: 30px; padding: 0 10px; border-radius: 12px;
+        border: 1px solid var(--nomark-border); background: var(--nomark-soft);
+        color: var(--nomark-muted); cursor: pointer; font-size: 12px; font-weight: 600;
+        display: inline-flex; align-items: center; gap: 5px;
+        transition: all .15s;
+      }
+      .pm-topbar-btn:hover { background: var(--nomark-border); color: var(--nomark-ink); border-color: var(--nomark-border); }
+      .pm-add-bar {
+        padding: 10px 14px; border-top: 1px solid var(--nomark-border);
+        flex-shrink: 0; display: flex; gap: 8px; background: var(--nomark-card);
+      }
+      .pm-add-btn, .pm-export-btn {
+        min-height: 40px; font-size: 12px; font-weight: 700; border-radius: 10px;
+        border: 1px solid var(--nomark-border); cursor: pointer;
+        display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+        transition: background .16s ease, border-color .16s ease, color .16s ease, transform .12s ease, box-shadow .16s ease;
+      }
+      .pm-add-btn { flex: 1; background: var(--nomark-ink); border-color: var(--nomark-ink); color: var(--nomark-card); }
+      .pm-export-btn { padding: 0 14px; background: var(--nomark-card); color: var(--nomark-ink); }
+      .pm-add-btn:hover, .pm-export-btn:hover { box-shadow: 0 5px 16px rgba(0,0,0,.1); }
+      .pm-export-btn:hover { background: var(--nomark-soft); border-color: var(--nomark-border); }
+      .pm-search-bar {
+        padding: 12px 14px; border-bottom: 1px solid var(--nomark-border);
+        flex-shrink: 0; background: var(--nomark-card);
+      }
+      .pm-search-bar input {
+        width: 100%; border: 1px solid var(--nomark-border); border-radius: 12px;
+        background: var(--nomark-soft); color: var(--nomark-ink);
+        padding: 10px 12px; font-size: 13px; outline: none;
+        transition: border-color .16s ease, box-shadow .16s ease;
+        box-sizing: border-box;
+      }
+      .pm-search-bar input:focus {
+        border-color: var(--nomark-accent, #ff6060);
+        box-shadow: 0 0 0 4px rgba(255,96,96,0.12);
+        background: var(--nomark-card);
+      }
+      .pm-categories {
+        display: flex; gap: 8px; padding: 10px 14px; flex-wrap: wrap;
+        overflow-x: auto; border-bottom: 1px solid var(--nomark-border);
+        background: var(--nomark-card); flex-shrink: 0;
+      }
+      .pm-cat-btn, .pm-cat-add {
+        min-height: 30px; padding: 0 10px;
+        border: 1px solid var(--nomark-border); background: var(--nomark-soft);
+        color: var(--nomark-muted); cursor: pointer;
+        display: inline-flex; align-items: center; gap: 5px;
+        white-space: nowrap; font-size: 12px; font-weight: 600;
+        border-radius: 12px; transition: all .15s;
+      }
+      .pm-cat-btn:hover, .pm-cat-add:hover { background: var(--nomark-border); color: var(--nomark-ink); }
+      .pm-cat-btn.pm-active { background: var(--nomark-ink); border-color: var(--nomark-ink); color: var(--nomark-card); }
+      .pm-cat-del {
+        margin-left: 2px; padding: 0; border: none; background: transparent;
+        color: inherit; cursor: pointer; font-size: 14px; line-height: 1; opacity: .55;
+      }
+      .pm-cat-del:hover { opacity: 1; color: #ef4444; }
+      .pm-cat-btn.pm-active .pm-cat-del:hover { color: currentColor; }
+      .pm-cat-add { border-style: dashed; background: transparent; color: var(--nomark-muted); }
+      .pm-cat-label { display: inline-flex; align-items: center; gap: 5px; transform-origin: center center; }
+      .pm-cat-btn.pm-cat-draggable { cursor: grab; transition: transform .2s ease, box-shadow .2s ease; }
+      .pm-cat-btn.pm-cat-draggable:active { cursor: grabbing; }
+      .pm-cat-btn.pm-cat-source { display: none !important; }
+      .pm-cat-btn.pm-cat-lifted {
+        position: fixed !important; margin: 0 !important;
+        z-index: 2147483647; pointer-events: none; opacity: .99;
+        background: var(--nomark-card); border-color: var(--nomark-accent, #ff6060);
+        box-shadow: 0 18px 38px rgba(0,0,0,.22), 0 0 0 1px rgba(255,96,96,.18);
+        transform: translate3d(var(--pm-cat-dx,0px), var(--pm-cat-dy,0px), 0) scale(1.05) rotate(var(--pm-cat-rotate,.35deg));
+        transform-origin: center center;
+        will-change: transform;
+        transition: box-shadow .18s ease, border-color .18s ease, opacity .18s ease;
+      }
+      .pm-categories.pm-cat-reordering .pm-cat-btn.pm-cat-draggable:not(.pm-cat-lifted):not(.pm-cat-source) {
+        transition: transform .34s cubic-bezier(.16,1,.3,1), box-shadow .18s ease, border-color .18s ease;
+      }
+      .pm-categories.pm-cat-reordering .pm-cat-btn.pm-cat-draggable:not(.pm-cat-lifted):not(.pm-cat-source) .pm-cat-label {
+        animation: pmCatJiggle .62s ease-in-out infinite alternate;
+        animation-delay: var(--pm-cat-jiggle-delay,0ms);
+      }
+      .pm-cat-btn.pm-cat-shifting { z-index: 1; }
+      .pm-cat-placeholder {
+        height: 28px; display: inline-flex; flex-shrink: 0;
+        border: 1px dashed rgba(255,96,96,.38); border-radius: 12px;
+        background: linear-gradient(90deg, rgba(255,96,96,.075), rgba(255,96,96,.04));
+        transition: width .24s cubic-bezier(.16,1,.3,1), transform .24s cubic-bezier(.16,1,.3,1);
+      }
+      .pm-cat-btn.pm-cat-drop-pop { animation: pmCatDropPop .32s cubic-bezier(.2,1.25,.2,1); }
+      @keyframes pmCatJiggle {
+        0% { transform: translate3d(-.35px,0,0) rotate(-.22deg); }
+        50% { transform: translate3d(.25px,-.25px,0) rotate(.12deg); }
+        100% { transform: translate3d(.35px,.15px,0) rotate(.24deg); }
+      }
+      @keyframes pmCatDropPop { 0% { transform: scale(1.08); } 58% { transform: scale(.96); } 100% { transform: scale(1); } }
+      .pm-list { flex: 1; overflow-y: auto; padding: 8px 14px; }
+      .pm-list::-webkit-scrollbar { width: 8px; }
+      .pm-list::-webkit-scrollbar-thumb { background: rgba(0,0,0,.12); border-radius: 4px; }
+      .pm-empty { text-align: center; padding: 40px 0; color: var(--nomark-muted); font-size: 13px; }
+      .pm-fav-divider {
+        display: flex; align-items: center; gap: 8px; padding: 8px 0; margin: 4px 0;
+        font-size: 11px; color: var(--nomark-muted); text-transform: uppercase; letter-spacing: .5px;
+      }
+      .pm-fav-divider::before, .pm-fav-divider::after { content: ''; flex: 1; height: 1px; background: var(--nomark-border); }
+      .pm-item {
+        position: relative; padding: 14px; margin-bottom: 10px;
+        border: 1px solid var(--nomark-border); border-radius: 16px;
+        background: var(--nomark-card); cursor: grab; user-select: none;
+        -webkit-user-select: none; touch-action: pan-y; will-change: transform;
+        transition: border-color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease;
+      }
+      .pm-item:hover {
+        border-color: var(--nomark-border); box-shadow: 0 10px 24px rgba(0,0,0,.065);
+        transform: translateY(-1px);
+      }
+      .pm-item:active { cursor: grabbing; }
+      .pm-item-inner { transform-origin: center center; will-change: transform; }
+      .pm-item-title {
+        display: flex; align-items: flex-start; gap: 8px;
+        margin-bottom: 7px; min-width: 0;
+        color: var(--nomark-ink); font-size: 14px; font-weight: 700; line-height: 1.35;
+      }
+      .pm-item-title > span:not(.pm-item-title-tags) {
+        min-width: 0; overflow: hidden; text-overflow: ellipsis; word-break: break-word;
+      }
+      .pm-item-title .pm-fav { color: #f59e0b; font-size: 12px; line-height: 1.6; }
+      .pm-item-title-tags {
+        margin-left: auto; display: flex; gap: 5px; flex-wrap: wrap;
+        justify-content: flex-end; max-width: 48%;
+      }
+      .pm-tag {
+        display: inline-block; padding: 1px 6px; border-radius: 4px;
+        font-size: 10px; background: var(--nomark-soft); color: var(--nomark-muted);
+      }
+      .pm-var-tag { background: rgba(255,96,96,.08); color: var(--nomark-accent, #ff6060); }
+      .pm-item-preview {
+        max-height: 44px; overflow: hidden; margin-bottom: 10px;
+        color: var(--nomark-muted); font-size: 12px; line-height: 1.6;
+      }
+      .pm-item-preview:hover { overflow-y: auto; scrollbar-width: none; }
+      .pm-item-preview:hover::-webkit-scrollbar { display: none; }
+      .pm-item-meta { display: flex; flex-direction: column; align-items: stretch; gap: 10px; }
+      .pm-item-tags { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+      .pm-item-actions { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; align-items: stretch; }
+      .pm-item-actions button {
+        width: 100%; min-width: 0; min-height: 34px;
+        padding: 0 8px; border-radius: 10px;
+        border: 1px solid var(--nomark-border); background: var(--nomark-soft);
+        cursor: pointer; font-size: 11px; color: var(--nomark-muted);
+        font-weight: 650; display: inline-flex; align-items: center;
+        justify-content: center; gap: 5px;
+        transition: border-color .15s ease, background .15s ease, color .15s ease, transform .15s ease;
+      }
+      .pm-item-actions button:hover {
+        background: var(--nomark-border); color: var(--nomark-ink);
+        border-color: var(--nomark-border); transform: translateY(-1px);
+      }
+      .pm-btn-ico { font-size: 12px; }
+      .pm-list.pm-reordering { user-select: none; }
+      .pm-list.pm-reordering .pm-item:not(.pm-lifted) { transition: transform .34s cubic-bezier(.16,1,.3,1), box-shadow .18s ease, border-color .18s ease, background .18s ease; }
+      .pm-list.pm-reordering .pm-item:not(.pm-lifted) .pm-item-inner {
+        animation: pmNeighborJiggle .62s ease-in-out infinite alternate;
+        animation-delay: var(--pm-jiggle-delay,0ms);
+      }
+      .pm-item.pm-drag-source { display: none !important; }
+      .pm-item.pm-lifted {
+        position: fixed !important; margin: 0 !important;
+        z-index: 2147483647; pointer-events: none; cursor: grabbing; opacity: .99;
+        border-color: var(--nomark-accent, #ff6060);
+        background: var(--nomark-card);
+        box-shadow: 0 28px 64px rgba(0,0,0,.24), 0 0 0 1px rgba(255,96,96,.18);
+        transform: translate3d(var(--pm-drag-x,0px), var(--pm-drag-y,0px), 0) scale(1.035) rotate(var(--pm-drag-rotate,.45deg));
+        transform-origin: center center;
+        will-change: transform,left,top;
+        transition: box-shadow .18s ease, border-color .18s ease, opacity .18s ease, filter .18s ease;
+        filter: saturate(1.02);
+      }
+      .pm-item.pm-lifted .pm-item-inner { animation: pmLiftedJiggle .46s ease-in-out infinite alternate; }
+      .pm-item.pm-drop-pop { animation: pmDropPop .32s cubic-bezier(.2,1.25,.2,1); }
+      .pm-item.pm-drop-pop .pm-item-inner { animation: none; }
+      @keyframes pmDropPop { 0% { transform: scale(1.08); } 58% { transform: scale(.96); } 100% { transform: scale(1); } }
+      @keyframes pmNeighborJiggle {
+        0% { transform: translate3d(-.35px,0,0) rotate(-.22deg); }
+        50% { transform: translate3d(.25px,-.25px,0) rotate(.12deg); }
+        100% { transform: translate3d(.35px,.15px,0) rotate(.24deg); }
+      }
+      @keyframes pmLiftedJiggle { 0% { transform: rotate(-.38deg); } 100% { transform: rotate(.48deg); } }
+      .pm-drag-placeholder {
+        border: 2px dashed rgba(255,96,96,.38); border-radius: 16px;
+        background: linear-gradient(90deg, rgba(255,96,96,.075), rgba(255,96,96,.04));
+        margin-bottom: 10px; transition: height .24s cubic-bezier(.16,1,.3,1), transform .24s cubic-bezier(.16,1,.3,1), opacity .18s ease;
+      }
+      .pm-shifting { will-change: transform; z-index: 1; }
+      .pm-modal-overlay {
+        --nomark-accent: #ff6060;
+        --nomark-accent-2: #ff9a9a;
+        --nomark-ink: #1f2937;
+        --nomark-muted: #6b7280;
+        --nomark-soft: #f6f7f9;
+        --nomark-border: rgba(229, 231, 235, 0.92);
+        --nomark-card: rgba(255, 255, 255, 0.96);
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.4); z-index: 2147483647;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .pm-modal {
+        background: var(--nomark-card, #fff); border-radius: 16px; padding: 24px;
+        width: 420px; max-width: 90vw; max-height: 80vh; overflow-y: auto;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+      }
+      .pm-modal h4 { margin: 0 0 16px; font-size: 16px; font-weight: 600; }
+      .pm-modal label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 4px; color: var(--nomark-muted); }
+      .pm-modal input, .pm-modal textarea, .pm-modal select {
+        width: 100%; padding: 10px 12px; border-radius: 12px; font-size: 13px;
+        border: 1px solid var(--nomark-border); background: var(--nomark-soft);
+        outline: none; margin-bottom: 12px; box-sizing: border-box;
+        transition: border-color .16s ease, box-shadow .16s ease;
+      }
+      .pm-modal input:focus, .pm-modal textarea:focus, .pm-modal select:focus {
+        border-color: var(--nomark-accent, #ff6060);
+        box-shadow: 0 0 0 4px rgba(255,96,96,0.12);
+      }
+      .pm-modal textarea { min-height: 120px; resize: vertical; }
+      .pm-help-text { margin: -8px 0 12px; font-size: 11px; color: var(--nomark-muted); line-height: 1.55; }
+      .pm-modal select.pm-select-native { display: none; }
+      .pm-select { position: relative; z-index: 2; margin-bottom: 13px; }
+      .pm-select.pm-open { z-index: 30; }
+      .pm-select-trigger {
+        width: 100%; min-height: 42px; padding: 0 12px 0 13px;
+        border: 1px solid var(--nomark-border); border-radius: 12px;
+        background: linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,96,96,.025)), var(--nomark-soft);
+        color: var(--nomark-ink); cursor: pointer;
+        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        transition: border-color .16s ease, box-shadow .16s ease, background .16s ease, transform .12s ease;
+      }
+      .pm-select-trigger:hover { border-color: rgba(255,96,96,.28); background: var(--nomark-card); }
+      .pm-select.pm-open .pm-select-trigger {
+        border-color: rgba(255,96,96,.56);
+        background: var(--nomark-card);
+        box-shadow: 0 0 0 4px rgba(255,96,96,.12), 0 8px 22px rgba(0,0,0,.08);
+      }
+      .pm-select-value {
+        min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        font-size: 13px; font-weight: 650;
+      }
+      .pm-select-arrow {
+        width: 24px; height: 24px; border-radius: 999px;
+        display: inline-flex; align-items: center; justify-content: center;
+        color: var(--nomark-muted); background: rgba(255,96,96,.08);
+        transition: transform .16s ease, color .16s ease, background .16s ease;
+      }
+      .pm-select.pm-open .pm-select-arrow {
+        transform: rotate(180deg); color: var(--nomark-ink); background: rgba(255,96,96,.14);
+      }
+      .pm-select-menu {
+        position: absolute; left: 0; right: 0; top: calc(100% + 7px);
+        max-height: 188px; overflow: auto; padding: 6px;
+        border: 1px solid var(--nomark-border); border-radius: 14px;
+        background: var(--nomark-card);
+        box-shadow: 0 18px 48px rgba(0,0,0,.18), 0 0 0 1px rgba(255,96,96,.04);
+        opacity: 0; transform: translateY(-4px) scale(.985);
+        pointer-events: none; transform-origin: top center;
+        transition: opacity .14s ease, transform .16s cubic-bezier(.16,1,.3,1);
+      }
+      .pm-select.pm-open .pm-select-menu { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+      .pm-select-option {
+        width: 100%; min-height: 34px; padding: 0 10px;
+        border: 1px solid transparent; border-radius: 10px;
+        background: transparent; color: var(--nomark-muted); cursor: pointer;
+        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        font-size: 13px; font-weight: 600; text-align: left;
+      }
+      .pm-select-option:hover, .pm-select-option:focus-visible {
+        background: var(--nomark-soft); color: var(--nomark-ink); outline: none;
+      }
+      .pm-select-option.pm-selected {
+        border-color: rgba(255,96,96,.22); background: rgba(255,96,96,.1); color: var(--nomark-ink);
+      }
+      .pm-select-check { color: var(--nomark-accent, #ff6060); font-size: 12px; opacity: 0; }
+      .pm-select-option.pm-selected .pm-select-check { opacity: 1; }
+      .pm-modal-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+      .pm-btn-cancel, .pm-btn-save {
+        padding: 8px 20px; border-radius: 12px; border: 1px solid var(--nomark-border);
+        cursor: pointer; font-size: 13px; font-weight: 600; transition: all .15s;
+      }
+      .pm-btn-cancel { background: var(--nomark-soft); color: var(--nomark-ink); }
+      .pm-btn-cancel:hover { background: var(--nomark-border); }
+      .pm-btn-save { background: var(--nomark-accent, #ff6060); color: #fff; border-color: var(--nomark-accent, #ff6060); }
+      .pm-btn-save:hover { background: #e55555; }
+      .pm-btn-danger {
+        background: #ef4444; color: #fff; border: none; border-radius: 12px;
+        padding: 8px 20px; font-size: 13px; font-weight: 600;
+        cursor: pointer; transition: all .15s ease;
+      }
+      .pm-btn-danger:hover { background: #dc2626; transform: translateY(-1px); box-shadow: 0 5px 16px rgba(239,68,68,.25); }
+      .pm-dialog-modal { max-width: 480px; }
+      .pm-dialog-body { font-size: 13px; color: var(--nomark-muted); line-height: 1.7; margin-bottom: 16px; }
+      .pm-dialog-input {
+        width: 100%; box-sizing: border-box; border: 1px solid var(--nomark-border);
+        border-radius: 12px; background-color: var(--nomark-soft); color: var(--nomark-ink);
+        padding: 10px 12px; font-size: 13px; outline: none; margin-bottom: 16px;
+        transition: border-color .16s ease, box-shadow .16s ease;
+      }
+      .pm-dialog-input:focus { border-color: rgba(255,96,96,.55); box-shadow: 0 0 0 4px rgba(255,96,96,.12); }
+      .pm-conflict-modal { width: 520px; }
+      .pm-conflict-desc { font-size: 13px; color: var(--nomark-muted); margin-bottom: 12px; }
+      .pm-conflict-global { display: flex; gap: 8px; margin-bottom: 12px; }
+      .pm-conflict-global-btn {
+        padding: 6px 14px; border-radius: 12px; border: 1px solid var(--nomark-border);
+        background: var(--nomark-card); cursor: pointer; font-size: 12px; font-weight: 600; transition: all .15s;
+      }
+      .pm-conflict-global-btn:hover { border-color: var(--nomark-accent, #ff6060); }
+      .pm-conflict-global-btn.pm-conflict-active { background: var(--nomark-accent, #ff6060); color: #fff; border-color: var(--nomark-accent, #ff6060); }
+      .pm-conflict-list { max-height: 300px; overflow-y: auto; }
+      .pm-conflict-item { padding: 10px; border: 1px solid var(--nomark-border); border-radius: 12px; margin-bottom: 8px; }
+      .pm-conflict-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+      .pm-conflict-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+      .pm-conflict-side { padding: 8px; border-radius: 8px; background: var(--nomark-soft); }
+      .pm-conflict-side-header { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px; color: var(--nomark-muted); }
+      .pm-conflict-newer { color: var(--nomark-accent, #ff6060); font-weight: 600; }
+      .pm-conflict-side-content { font-size: 12px; max-height: 60px; overflow: hidden; text-overflow: ellipsis; }
+      .pm-conflict-actions { display: flex; gap: 8px; }
+      .pm-conflict-btn {
+        padding: 4px 12px; border-radius: 8px; border: 1px solid var(--nomark-border);
+        background: var(--nomark-card); cursor: pointer; font-size: 12px; font-weight: 600;
+      }
+      .pm-conflict-btn:hover { border-color: var(--nomark-accent, #ff6060); }
+      .pm-conflict-btn.pm-conflict-active { background: var(--nomark-accent, #ff6060); color: #fff; border-color: var(--nomark-accent, #ff6060); }
+      .pm-footer {
+        padding: 10px 14px; border-top: 1px solid var(--nomark-border);
+        display: flex; align-items: center; justify-content: space-between;
+        flex-shrink: 0; font-size: 11px; color: var(--nomark-muted);
+      }
+    `;
+    modal.appendChild(style);
+    modal.innerHTML += `
+      <div class="pm-topbar">
+        <h3>提示词库</h3>
+        <span class="pm-topbar-spacer"></span>
+        <button class="pm-topbar-btn" id="pm-btn-close" title="关闭">✕ 关闭</button>
+      </div>
+      <div class="pm-search-bar">
+        <input id="pm-search" type="text" placeholder="搜索提示词..." />
+      </div>
+      <div class="pm-categories" id="pm-categories"></div>
+      <div class="pm-list" id="pm-list"></div>
+      <div class="pm-add-bar">
+        <button class="pm-add-btn" id="pm-btn-add" title="新增提示词"><span class="pm-btn-ico">➕</span><span class="pm-btn-label">新增提示词</span></button>
+        <button class="pm-export-btn" id="pm-btn-import" title="导入 JSON"><span class="pm-btn-ico">📥</span><span class="pm-btn-label">导入</span></button>
+        <button class="pm-export-btn" id="pm-btn-export" title="导出 JSON"><span class="pm-btn-ico">📤</span><span class="pm-btn-label">导出</span></button>
+        <input type="file" id="pm-file-input" accept=".json" style="display:none" />
+      </div>
+      <div class="pm-footer">
+        <span>拖拽排序 · 模板变量 {变量名} · Ctrl+Enter 保存</span>
+        <span>Esc 关闭</span>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    promptModalElement = modal;
+    document.getElementById('pm-btn-close').addEventListener('click', closePromptModal);
+    document.getElementById('pm-btn-add').addEventListener('click', () => LibraryUI.showEditModal());
+    document.getElementById('pm-btn-import').addEventListener('click', () => document.getElementById('pm-file-input').click());
+    document.getElementById('pm-btn-export').addEventListener('click', () => { StorageService.exportJSON(LibraryUI._prompts); showToast('已导出提示词数据'); });
+    document.getElementById('pm-file-input').addEventListener('change', e => LibraryUI._handleImport(e));
+    document.getElementById('pm-search').addEventListener('input', e => { LibraryUI._searchKeyword = e.target.value; LibraryUI.renderList(); });
+    modal.addEventListener('keydown', e => { if (e.key === 'Escape') closePromptModal(); });
+  }
   const NOMARK_BUTTON_HOST_ID = "doubao-nomark-button-host";
   const NOMARK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7"><rect x="3.5" y="5" width="17" height="14" rx="3"/><circle cx="8.2" cy="9.2" r="1.25"/><path d="m5.8 16 4.15-4.15a1.35 1.35 0 0 1 1.9 0L14 14l1.15-1.15a1.35 1.35 0 0 1 1.9 0L18.7 14.5"/></g></svg>`;
 
@@ -1914,6 +3578,10 @@
   }
 
   function openModal() {
+    // 关闭提示词库面板
+    if (promptModalElement && promptModalElement.classList.contains("show")) {
+      closePromptModal();
+    }
     if (!modalElement) createModal();
     renderModalImages();
     modalElement.classList.add("show");
@@ -2881,5 +4549,9 @@
 
   console.log("[无水印] 所有函数已定义，准备初始化 UI");
   createFloatingButton();
+  createPromptFloatingButton();
+  LibraryUI.init().then(() => console.log("[无水印] 提示词库初始化完成")).catch(e => console.log("[无水印] 提示词库初始化失败:", e));
+  GM_registerMenuCommand('打开提示词库', () => openPromptModal());
+  GM_registerMenuCommand('导出提示词备份', () => { StorageService.exportJSON(LibraryUI._prompts); showToast('已导出'); });
   console.log("[无水印] 脚本初始化完成");
 })();
